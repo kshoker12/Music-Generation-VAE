@@ -3,6 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import os
+import tempfile
+
 
 def tokens_to_midi(tokens: list[int], tok: Any):
     """
@@ -24,6 +27,23 @@ def tokens_to_midi(tokens: list[int], tok: Any):
         # Last resort: may require wrapping; keep explicit error for now.
         raise RuntimeError("Tokenizer has tokens_to_track but no tokens_to_midi/decode; unsupported miditok version.")
     raise RuntimeError("Tokenizer does not support detokenization (missing tokens_to_midi/decode).")
+
+
+def midi_to_bytes(midi_obj: Any) -> bytes:
+    """
+    Serialize a miditok / miditoolkit / symusic MIDI object to bytes without requiring a stable in-memory API.
+    """
+    fd, name = tempfile.mkstemp(suffix=".mid")
+    os.close(fd)
+    tmp_path = Path(name)
+    try:
+        write_midi(midi_obj, tmp_path)
+        return tmp_path.read_bytes()
+    finally:
+        try:
+            tmp_path.unlink(missing_ok=True)  # py3.8+: ok; project is 3.12
+        except Exception:
+            pass
 
 
 def write_midi(midi_obj: Any, out_path: str | Path) -> Path:

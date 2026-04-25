@@ -1,0 +1,10 @@
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+pydantic==2.10.3
+
+# Torch: install the CUDA wheel appropriate for your RunPod image.
+# Keep this unpinned here; pin in your RunPod build command if needed.
+torch>=2.4,<3
+
+# miditok + deps (tokenizer + detokenization)
+miditok>=3.0.0
