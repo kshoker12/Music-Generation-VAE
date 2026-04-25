@@ -1,0 +1,18 @@
+[project]
+name = "musicgen-tooling"
+version = "0.0.0"
+description = "Local tooling for preprocessing + artifact validation (training runs on Kaggle)."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0.0"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+

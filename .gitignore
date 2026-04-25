@@ -1,0 +1,76 @@
+# --- OS / editor ---
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+
+.idea/
+.vscode/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+
+# Virtual envs
+.venv/
+venv/
+ENV/
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+
+# --- ML / data artifacts (keep repo small) ---
+# Datasets / downloads / caches
+data/
+kaggle/
+
+# Generated artifacts (preprocessing outputs, indexes, manifests, etc.)
+artifacts/
+
+# Training outputs / logs
+runs/
+logs/
+checkpoints/
+wandb/
+lightning_logs/
+mlruns/
+
+# Model checkpoints / weights
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+
+# Large numpy / torch dumps
+*.npy
+*.npz
+*.mmap
+*.memmap
+*.pkl
+*.pickle
+*.joblib
+
+# Audio / MIDI outputs
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.mid
+*.midi
+
+# If you ever export PDFs locally
+*.pdf
+
+# --- Keep small repo-owned shared docs/schemas even if under artifacts-like paths ---
+!shared/artifacts/
+!shared/artifacts/**/*

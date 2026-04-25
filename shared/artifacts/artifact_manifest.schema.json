@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/musicgen/artifact_manifest.schema.json",
+  "title": "Music generation artifact manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "manifest_version",
+    "model_family",
+    "exported_at",
+    "repro",
+    "tokenizer",
+    "sequence",
+    "attributes",
+    "onnx"
+  ],
+  "properties": {
+    "manifest_version": { "type": "string", "minLength": 1 },
+    "model_family": { "type": "string", "minLength": 1 },
+    "exported_at": { "type": "string", "minLength": 1 },
+    "git_sha": { "type": "string" },
+    "repro": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seed_recommended"],
+      "properties": {
+        "seed_recommended": { "type": "integer" }
+      }
+    },
+    "tokenizer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "vocab_size", "special_tokens"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "vocab_size": { "type": "integer", "minimum": 1 },
+        "special_tokens": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["pad", "bos", "bar"],
+          "properties": {
+            "pad": { "type": "integer", "minimum": 0 },
+            "bos": { "type": "integer", "minimum": 0 },
+            "bar": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    },
+    "sequence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["block_size", "bars_per_sample"],
+      "properties": {
+        "block_size": { "type": "integer", "minimum": 1 },
+        "bars_per_sample": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "attributes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["names", "bins"],
+      "properties": {
+        "names": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "minItems": 1
+        },
+        "bins": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["num_bins", "min_bin", "max_bin"],
+          "properties": {
+            "num_bins": { "type": "integer", "minimum": 2 },
+            "min_bin": { "type": "integer" },
+            "max_bin": { "type": "integer" }
+          }
+        }
+      }
+    },
+    "onnx": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file", "contains", "io"],
+      "properties": {
+        "file": { "type": "string", "minLength": 1 },
+        "contains": {
+          "type": "string",
+          "enum": ["conductor+decoder", "decoder_only", "full_generate"]
+        },
+        "io": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Free-form description of ONNX inputs/outputs; tightened later."
+        }
+      }
+    }
+  }
+}
+
