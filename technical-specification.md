@@ -119,6 +119,7 @@ config = TokenizerConfig(
 		- `n_embed`: $512$
 		- `n_head`: $8$ 
 		- `feed-forward`: $4$ $\times$ `n_embed` $= 2048$  
+		- `dropout`: $0.1$ (applied inside Transformer layers; no embedding dropout)
 	- **Parameters ($\approx 19.6$ Million Total):**
 		- **Token Embedding (`nn.Embedding(195, 512)`):** $195 \text{ tokens} \times 512 \text{ dims} = \mathbf{99,840} \text{ parameters}.$
 		- **Positional Encoding (`nn.Embedding(1024, 512)`):** $1024 \text{ positions} \times 512 \text{ dims} = \mathbf{524,288} \text{ parameters}.$
@@ -164,6 +165,17 @@ config = TokenizerConfig(
 	  $$h_k^{(1)} = \text{GRU}^{(1)}(\text{BarEmbed}_k, h_{k-1}^{(1)})$$
 	  $$h_k^{(2)} = \text{GRU}^{(2)}(h_k^{(1)}, h_{k-1}^{(2)})$$
 	  $$z_k = h_k^{(2)}$$
+
+# Baseline: Simple VAE (Non-hierarchical)
+- **Goal:** Provide a comparison point between the full **hierarchical** VAE and a standard **non-hierarchical** VAE while keeping the **same encoder and the same FiLM decoder** (matched capacity). This isolates the value of the Conductor and bar-level latent sequence $z_k$.
+- **Key change (remove Conductor):** Instead of expanding $z_p \\rightarrow z_k$ with a GRU, we directly project the global latent to a decoder-aligned hidden vector:
+	- $z_p \\in \\mathbb{R}^{128}$ (sampled via reparameterization as usual)
+	- $z_g = \\text{Linear}(z_p) \\in \\mathbb{R}^{384}$ where `Linear: 128 -> 384`
+	- Repeat across bars: $z_g$ is broadcast to shape $[B, 8, 384]$ (same value for each of the 8 bars)
+- **Condition vectors:** Attributes are embedded exactly the same way to get $A_k \\in \\mathbb{R}^{128}$ per bar, then concatenate:
+	- $C_k = [z_g; A_k] \\in \\mathbb{R}^{512}$
+	- $C_k$ is broadcast to token timesteps using `bar_indices` (same as hierarchical VAE) and injected via FiLM at every decoder layer/timestep.
+- **Training objective:** Identical ELBO training to the hierarchical VAE (PAD-masked reconstruction CE + KL with cyclical $\\beta$ annealing + KL free bits). This keeps the comparison fair: the only structural difference is the absence of the Conductor.
 # Hierarchical Latent Space ($z_p \rightarrow z_k$)
 - **Hierarchical Design:** The architecture deliberately separates a highly compressed global bottleneck from an expanded bar-level condition. This compact-to-expanded pipeline is the key to maintaining long-range musical coherence across all $8$ bars while still giving the decoder rich, bar-by-bar generation instructions. This design ensures $z_p$ remains a compact, semantically rich representation while $z_k$ provides the detailed, temporally-aware guidance the decoder needs.
 - **Global Latent $z_p$ ($128$-dimensional):** This is the true, continuous VAE bottleneck. The bi-directional encoder compresses the entire $8$-bar chunk into this single vector.
@@ -182,6 +194,7 @@ config = TokenizerConfig(
 	    - `n_head:` $8$
 	    - `feed-forward`: $4$ $\times$ `n_embed` $= 2048$  
 	    - `block_size:`$1024$ 
+	    - `dropout`: $0.1$ residual dropout (after attention and after MLP); no embedding dropout
 	- **Parameters ($\approx 22.8$ Million Total):**
 		- **Token Embedding (`nn.Embedding(195, 512)`):** $195 \times 512 = \mathbf{99,840}$ parameters.
 		- **Positional Encoding (`nn.Embedding(1024, 512)`):** $1024 \times 512 = \mathbf{524,288}$ parameters.
@@ -219,6 +232,7 @@ config = TokenizerConfig(
 	- `n_layers=6`, `n_embed=512`, `n_head=8`, `d_ff=2048`, `block_size=1024`
 	- Learned token embedding + learned absolute positional embedding
 	- FiLM modulation applied at every layer/timestep using the bar-aligned attribute condition \(\hat{C}_{k(t)}\) (aligned via `bar_indices`).
+	- Residual dropout: $0.1$ (after attention and after MLP); no embedding dropout
 - **Training objective:** Standard next-token prediction with **PAD-masked cross-entropy** (do not train on `<PAD>` tokens). This ensures padding does not dominate loss/gradients and keeps the baseline comparable to the VAE decoder’s reconstruction objective.
 # Training Objective (The ELBO Loss)
 - **Training Paradigm:** The model is trained end-to-end using teacher forcing. The objective is to maximize the Evidence Lower Bound (ELBO) of the data, which mathematically translates to minimizing a composite loss function comprising two distinct terms: Reconstruction Loss and KL Divergence (with Annealing).
@@ -233,7 +247,9 @@ config = TokenizerConfig(
 		- **Purpose:** Regularizes the global latent space $z_p$ ($128$-dimensional) to approximate a standard normal prior $\mathcal{N}(0, I)$, ensuring the space is continuous and smoothly interpolatable.  
 		- **The Posterior Collapse Threat:** Because the Decoder is a powerful autoregressive Transformer, it is highly susceptible to posterior collapse (ignoring $z_p$ entirely and relying solely on causal history).  
 		- **The Cyclical β-Annealing Solution:** We utilize a **cyclical schedule**. Over $40$ epochs, $\beta$ will complete $4$ cycles ($10$ epochs each). In each cycle, $\beta$ ramps from $0.0$ to $0.1$ for $5K$ iterations and stays at $0.1$ for $5K$ iterations . This "shocks" the model into re-learning latent dependencies periodically.
-		- **KL Free Bits (Hinge Loss)**: To prevent **Posterior Collapse**, we modify the KL loss to include a "free bits" threshold $\lambda$ :$$\mathcal{L}_{KL} = \sum_{i=1}^{128} \max(D_{KL}(q_\phi(z_p^i \mid x) \parallel \mathcal{N}(0, 1)), \lambda)$$We set $\lambda = 1.0$ bit. This ensures the model is not penalized for using the latent space up to a certain complexity, preserving the "information budget" of each dimension.
+		- **KL Free Bits (Hinge Loss)**: To prevent **Posterior Collapse**, we apply a "free bits" threshold $\lambda$ **per latent dimension after batch-averaging**, which is more stable than hinging per-sample:
+		$$\mathcal{L}_{KL} = \sum_{i=1}^{128} \max\Big(\mathbb{E}_{x \sim \text{batch}}\big[D_{KL}(q_\phi(z_p^i \mid x) \parallel \mathcal{N}(0, 1))\big], \lambda\Big)$$
+		We set $\lambda = 1.0$ bit (converted to nats in code). This ensures the model is not penalized for using the latent space up to a certain complexity, preserving the "information budget" of each dimension while keeping training stable.
 - **Training Hyperparameters (Kaggle T4 Feasibility)**  
 	- **Optimizer:** AdamW (`lr = 3e-4`, `weight_decay = 0.01`).  
 	- **Precision:** Mixed Precision (FP16) using `torch.cuda.amp.GradScaler()` to maximize batch size on the $16$ GB T4 GPU.  

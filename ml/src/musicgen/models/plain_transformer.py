@@ -17,6 +17,7 @@ class PlainTransformerConfig:
     n_head: int = 8
     d_ff: int = 2048
     bars_per_sample: int = 8
+    dropout: float = 0.1
 
     # Attributes: 4 dims (polyphony, intensity, velocity, density), each binned 0..7
     num_attributes: int = 4
@@ -59,6 +60,7 @@ class CausalSelfAttention(nn.Module):
 
         self.qkv = nn.Linear(cfg.n_embed, 3 * cfg.n_embed, bias=True)
         self.proj = nn.Linear(cfg.n_embed, cfg.n_embed, bias=True)
+        self.dropout = float(cfg.dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: [B, T, C]
@@ -72,7 +74,14 @@ class CausalSelfAttention(nn.Module):
         v = v.view(B, T, self.n_head, self.head_dim).transpose(1, 2)
 
         # PyTorch uses optimized SDPA under the hood when available.
-        y = F.scaled_dot_product_attention(q, k, v, attn_mask=None, is_causal=True)  # [B, nh, T, hs]
+        y = F.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            attn_mask=None,
+            dropout_p=self.dropout if self.training else 0.0,
+            is_causal=True,
+        )  # [B, nh, T, hs]
         y = y.transpose(1, 2).contiguous().view(B, T, C)  # [B, T, C]
         return self.proj(y)
 
@@ -82,6 +91,7 @@ class FiLMBlock(nn.Module):
         super().__init__()
         self.ln1 = nn.LayerNorm(cfg.n_embed)
         self.attn = CausalSelfAttention(cfg)
+        self.resid_drop = nn.Dropout(cfg.dropout)
 
         # Conditioned FiLM: gamma/beta per token timestep, derived from cond_tok [B,T,C]
         self.film = nn.Linear(cfg.n_embed, 2 * cfg.n_embed, bias=True)
@@ -92,6 +102,7 @@ class FiLMBlock(nn.Module):
             nn.GELU(),
             nn.Linear(cfg.d_ff, cfg.n_embed),
         )
+        self.mlp_drop = nn.Dropout(cfg.dropout)
 
     def forward(self, x: torch.Tensor, cond_tok: torch.Tensor) -> torch.Tensor:
         # Pre-norm
@@ -99,9 +110,9 @@ class FiLMBlock(nn.Module):
         gamma_beta = self.film(cond_tok)
         gamma, beta = gamma_beta.chunk(2, dim=-1)
         h = h * (1.0 + gamma) + beta
-        x = x + self.attn(h)
+        x = x + self.resid_drop(self.attn(h))
 
-        x = x + self.mlp(self.ln2(x))
+        x = x + self.mlp_drop(self.mlp(self.ln2(x)))
         return x
 
 

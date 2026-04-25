@@ -1,57 +1,54 @@
+### Minimal .gitignore for this repo
+### Goal: keep generated/big artifacts out, keep code/docs in.
+
 # --- OS / editor ---
 .DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-
+Thumbs.db
 .idea/
 .vscode/
 
 # --- Python ---
 __pycache__/
 *.py[cod]
-*.pyd
 *.so
-
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
-.coverage
-coverage.xml
 
-# Virtual envs
+# Virtual environments
 .venv/
 venv/
 ENV/
+.python-version
+
+# Local env files (secrets)
+.env
+.env.*
 
 # --- Jupyter ---
 .ipynb_checkpoints/
 
-# --- ML / data artifacts (keep repo small) ---
-# Datasets / downloads / caches
-data/
-kaggle/
+# --- Project-specific generated ---
+attributes/
 
-# Generated artifacts (preprocessing outputs, indexes, manifests, etc.)
+# --- Large / generated artifacts (don’t commit) ---
 artifacts/
+data/
 
-# Training outputs / logs
+# Experiment/training output directories (common defaults)
 runs/
 logs/
 checkpoints/
 wandb/
 lightning_logs/
-mlruns/
+runs/
 
-# Model checkpoints / weights
+# Common model / tensor dump files (usually huge)
 *.pt
 *.pth
 *.ckpt
 *.safetensors
 *.onnx
-
-# Large numpy / torch dumps
 *.npy
 *.npz
 *.mmap
@@ -60,17 +57,15 @@ mlruns/
 *.pickle
 *.joblib
 
-# Audio / MIDI outputs
-*.wav
-*.mp3
-*.flac
-*.ogg
-*.mid
-*.midi
+# --- Web ---
+node_modules/
+dist/
+build/
+.next/
 
-# If you ever export PDFs locally
-*.pdf
-
-# --- Keep small repo-owned shared docs/schemas even if under artifacts-like paths ---
-!shared/artifacts/
-!shared/artifacts/**/*
+# --- Misc ---
+*.log
+*.tmp
+*.swp
+*.swo
+*.bak
