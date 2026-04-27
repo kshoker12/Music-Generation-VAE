@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import json
+import os
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 
@@ -60,6 +64,15 @@ def generate(body: GenerateBody, _: None = Depends(require_api_key)) -> Response
                 "to a valid checkpoint path."
             ),
         ) from e
+
+    # Persist a copy of every generation for later inspection/debugging.
+    dumps_root = Path(os.environ.get("DUMPS_DIR", "dumps")).resolve()
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    folder = dumps_root / f"{ts}_{body.model_type}_seed{body.seed}_{uuid4().hex[:8]}"
+    folder.mkdir(parents=True, exist_ok=False)
+    (folder / "generated.mid").write_bytes(midi_bytes)
+    (folder / "attributes.txt").write_text(json.dumps(body.attributes, indent=2), encoding="utf-8")
+
     filename = f"generated_{body.model_type}_seed{body.seed}.mid"
     return Response(
         content=midi_bytes,

@@ -1,0 +1,29 @@
+% Appendix / supplementary material (unlimited pages).
+
+\section{Implementation details}
+\subsection{Tokenizer configuration}
+We use a REMI-style tokenizer (via \texttt{miditok}) with a fixed vocabulary of 195 tokens. The representation includes explicit bar boundaries (\Bar) and in-bar position tokens, which makes it natural to define bar-aligned conditions and switch them during decoding.
+
+\subsection{Dataset filtering}
+We apply strict filtering on candidate 8-bar chunks to remove degenerate examples dominated by silence or extremely low rhythmic activity. This reduces mode collapse onto trivial patterns and improves the learning signal per batch.
+
+\subsection{Attributes and binning}
+We compute four per-bar descriptors (polyphony rate, rhythmic intensity, velocity dynamics, note density) and bin each into 8 discrete classes using global quantiles computed on the filtered training set. At training time, the model consumes only the binned labels; the raw descriptor computation is offline.
+
+\section{Model hyperparameters (summary)}
+All major hyperparameters are specified in \texttt{technical-specification.md}. The main architectural constants used throughout are:
+\begin{itemize}[leftmargin=*,itemsep=0pt]
+  \item Decoder hidden size $d=512$, $6$ layers, $8$ heads, FFN size $2048$, dropout $0.1$.
+  \item Global latent dimension $\dim(z_p)=128$.
+  \item Hierarchical conductor hidden size $384$ (2-layer GRU) producing 8 bar-level vectors $z_k\in\mathbb{R}^{384}$.
+  \item Attribute embedding: 4 attributes $\times$ 32 dims = $A_k\in\mathbb{R}^{128}$.
+  \item Condition vector: $C_k=[z_k;A_k]\in\mathbb{R}^{512}$ (3:1 split).
+\end{itemize}
+
+\section{Additional planned evaluations (TODO)}
+\begin{itemize}[leftmargin=*,itemsep=0pt]
+  \item \textbf{Controllability:} for each attribute, generate samples across bins 0--7 and compute Pearson/Spearman correlation between requested bins and measured descriptors from generated MIDI.
+  \item \textbf{Latent topology:} UMAP/t-SNE over inferred $z_p$ for test-set examples; color by composer metadata (if available) or by computed musical statistics.
+  \item \textbf{Qualitative:} curated MIDI/audio examples demonstrating bar-wise control (two-phase UI) and long-range coherence.
+\end{itemize}
+

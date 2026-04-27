@@ -2,7 +2,10 @@ name: Deploy web dashboard
 
 on:
   push:
-    branches: ["main"]
+    branches: ["main", "master"]
+    paths:
+      - "web/**"
+      - ".github/workflows/deploy_web.yml"
   workflow_dispatch: {}
 
 permissions:
@@ -28,8 +31,8 @@ jobs:
         run: npm --prefix web install --no-package-lock
       - name: Build
         env:
-          VITE_API_BASE_URL: ${{ secrets.VITE_API_BASE_URL }}
-          VITE_API_KEY: ${{ secrets.VITE_API_KEY }}
+          VITE_RUNPOD_ENDPOINT_ID: ${{ secrets.VITE_RUNPOD_ENDPOINT_ID }}
+          VITE_RUNPOD_API_KEY: ${{ secrets.VITE_RUNPOD_API_KEY }}
         run: npm --prefix web run build
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3

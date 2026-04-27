@@ -276,6 +276,21 @@ config = TokenizerConfig(
 	- **KL Capacity**: Monitor the average KL bits per dimension. If $D_{KL} \rightarrow 0$ across all dimensions, the Decoder is ignoring $z_p$.
 	- **Reconstruction Delta**: Monitor the drop in Cross-Entropy loss during the $\beta = 0$ portion of the cyclical annealing. A lack of improvement here indicates the Decoder is too weak.
 	- **Active Units**: Count dimensions where $D_{KL} > \lambda$. A healthy model should have multiple active latent dimensions contributing to the musical structure.
+
+# Model evaluation snapshots
+
+| Model | Architecture | Block size | Batch size | Iters (steps) | Train recon | Train KL bits/dim | Val recon | Val KL bits/dim | Test recon | Test KL bits/dim |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| VAE v4 | Hierarchical VAE (standard) | 650 | TBD | 80,000 | 1.6527 | 0.917 | 1.7052 | 0.916 | 1.7385 | 0.916 |
+| VAE v3 | Hierarchical VAE (standard) | 1024 | 16 | 50,000 | 1.6213 | 0.861 | 1.6930 | 0.859 | 1.6921 | 0.859 |
+| VAE v2 | Hierarchical VAE (standard) | 1024 | 40 | 20,000 | 1.7124 | 0.729 | 1.7735 | 0.729 | 1.7375 | 0.730 |
+| VAE v1 | Hierarchical VAE (standard) | 1024 | 16 | 10,000 | 1.9025 | 0.721 | 1.9083 | 0.724 | 1.9005 | 0.724 |
+| Simple v2 | Simple VAE (non-hierarchical) | 1024 | TBD | TBD | TBD | TBD | TBD | TBD | TBD | TBD |
+| Simple v1 | Simple VAE (non-hierarchical) | 1024 | 16 | 10,000 | 1.9947 | 0.788 | 1.9566 | 0.804 | 1.9391 | 0.800 |
+| Plain v4 | Plain decoder (baseline) | 650 | 16 | 80,000 | 1.7006 | — | 1.7181 | — | 1.7132 | — |
+| Plain v3 | Plain decoder (baseline) | 1024 | 15 | 50,000 | 1.8028 | — | 1.7071 | — | 1.7740 | — |
+| Plain v2 | Plain decoder (baseline) | 1024 | 40 | 20,000 | 1.7721 | — | 1.7827 | — | 1.7672 | — |
+| Plain v1 | Plain decoder (baseline) | 1024 | 16 | 10,000 | 2.0268 | — | 1.9558 | — | 1.9447 | — |
 # Inference
 - **Music Generation:** The primary goal is to generate a short, coherent classical piano piece ($8$ bars \(\approx 12\)–\(32\) seconds depending on tempo) from a sampled global latent vector, while giving the user full real-time control over musical attributes.
 - **Controllable Attributes (The Phased UI):** Attribute embeddings $A_k$ ($128$-dimensional) act as explicit, orthogonal control knobs. Each of the four attributes (Polyphony, Intensity, Velocity, Density) is binned into $8$ levels ($0$–$7$).

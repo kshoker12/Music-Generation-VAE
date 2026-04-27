@@ -1,35 +1,41 @@
 # MusicGen Dashboard (web)
 
-This UI is **static** (GitHub Pages) and calls your **RunPod FastAPI** endpoint for generation.
+Static **GitHub Pages** UI that calls **RunPod Serverless** (`runsync`) for generation (no FastAPI in this path).
 
 ## First-time GitHub Pages
 
 1. In the GitHub repo: **Settings → Pages → Build and deployment**.
-2. Set **Source** to **GitHub Actions** (not “Deploy from a branch”).
-3. Merge or push to **`main`** or **`master`** so [`.github/workflows/deploy_web.yml`](../.github/workflows/deploy_web.yml) runs (it only triggers on changes under `web/` or that workflow file, or on **Actions → Deploy web dashboard → Run workflow**).
-4. After a successful run, the site is served at  
-   `https://<owner>.github.io/<repo>/`  
-   (project site). Vite uses `base: "./"` in [vite.config.ts](vite.config.ts) so assets load correctly under that path.
+2. Set **Source** to **GitHub Actions**.
+3. Push changes under `web/` or run **Actions → Deploy web dashboard → Run workflow**.
+4. Site URL: `https://<owner>.github.io/<repo>/`. [vite.config.ts](vite.config.ts) uses `base: "./"` for subpath assets.
 
-## API env vars (optional until the backend exists)
+## RunPod build-time env (required for Generate)
 
-The dashboard **builds without** `VITE_*` set. The **Generate** button only needs them at runtime (they are baked in at build time by Vite).
+Vite bakes these in at `npm run build`. Add them as **repository Actions secrets** (Settings → Secrets and variables → Actions), then redeploy the web workflow so a new build runs:
 
-- **UI-only deploy**: omit repository secrets; the build still succeeds; **Generate** will error until you add secrets and redeploy.
-- **With API**: add repository **Settings → Secrets and variables → Actions** secrets `VITE_API_BASE_URL` and `VITE_API_KEY` (must match the inference service `API_KEY`, sent as `X-API-Key`). They are passed into the build job in the workflow.
+| Secret | Example | Meaning |
+|--------|---------|--------|
+| `VITE_RUNPOD_ENDPOINT_ID` | `y1vs0tn7rp44mp` | RunPod serverless **endpoint ID** (path segment in `https://api.runpod.ai/v2/<id>/runsync`) |
+| `VITE_RUNPOD_API_KEY` | (RunPod API key) | Sent as `Authorization: Bearer …` |
 
-When building locally:
+The workflow [`.github/workflows/deploy_web.yml`](../.github/workflows/deploy_web.yml) passes these into the build step as `env`.
 
-- **`VITE_API_BASE_URL`**: e.g. `https://<your-runpod-endpoint>` or `http://127.0.0.1:8000` (no trailing slash required)
-- **`VITE_API_KEY`**: must match the API service `API_KEY`
+**Security:** anyone can read `VITE_*` values from the published JavaScript bundle. Do not use a production RunPod key you cannot rotate or cap.
 
-Local dev example:
+**CORS:** the browser calls `https://api.runpod.ai` from `https://<user>.github.io`. If the console shows a CORS error, RunPod’s API must allow your origin, or you need a same-origin proxy (outside this repo’s static-only path).
+
+## Local dev
 
 ```bash
-export VITE_API_BASE_URL="http://127.0.0.1:8000"
-export VITE_API_KEY="devkey"
+export VITE_RUNPOD_ENDPOINT_ID="y1vs0tn7rp44mp"
+export VITE_RUNPOD_API_KEY="your_runpod_key"
 
 npm --prefix web install --no-package-lock
 npm --prefix web run dev -- --host 127.0.0.1 --port 5173
 ```
 
+The **Generate** button calls `POST https://api.runpod.ai/v2/<id>/runsync` with body `{ "input": { "endpoint": "generate", ... } }` and decodes `output.midi_b64` (with fallback for legacy nested `output.output.midi_b64` until workers pick up a newer handler image).
+
+## RunPod container (handler)
+
+Build and deploy the GPU image from repo root: see [services/runpod_serverless/README.md](../services/runpod_serverless/README.md). After changing `handler.py`, rebuild and push the image so RunPod workers return the flat `output.midi_b64` shape.

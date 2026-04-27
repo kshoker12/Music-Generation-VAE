@@ -1,0 +1,482 @@
+\documentclass[10pt]{article}
+
+% Self-contained Overleaf setup: embed bibliography in this .tex
+\usepackage{filecontents}
+\begin{filecontents*}{refs.bib}
+@inproceedings{roberts2018musicvae,
+  title        = {A Hierarchical Latent Vector Model for Learning Long-Term Structure in Music},
+  author       = {Roberts, Adam and Engel, Jesse and Raffel, Colin and Hawthorne, Curtis and Eck, Douglas},
+  booktitle    = {Proceedings of the 35th International Conference on Machine Learning (ICML)},
+  year         = {2018},
+  note         = {arXiv:1803.05428}
+}
+
+@article{wu2021musemorphose,
+  title        = {MuseMorphose: Full-Song and Fine-Grained Piano Music Style Transfer with One Transformer VAE},
+  author       = {Wu, Shih-Lun and Yang, Yi-Hsuan},
+  journal      = {arXiv preprint},
+  year         = {2021},
+  note         = {arXiv:2105.04090}
+}
+
+@article{ji2024emomusictv,
+  title        = {{EmoMusicTV}: Emotion-Conditioned Symbolic Music Generation With Hierarchical Transformer VAE},
+  author       = {Ji, Shulei and Yang, Xinyu},
+  journal      = {IEEE Transactions on Multimedia},
+  year         = {2024},
+  note         = {DOI: 10.1109/TMM.2023.3276177}
+}
+
+@inproceedings{vaswani2017attention,
+  title        = {Attention Is All You Need},
+  author       = {Vaswani, Ashish and Shazeer, Noam and Parmar, Niki and Uszkoreit, Jakob and Jones, Llion and Gomez, Aidan N. and Kaiser, Lukasz and Polosukhin, Illia},
+  booktitle    = {Advances in Neural Information Processing Systems (NeurIPS)},
+  year         = {2017}
+}
+
+@article{kingma2014vae,
+  title        = {Auto-Encoding Variational Bayes},
+  author       = {Kingma, Diederik P. and Welling, Max},
+  journal      = {arXiv preprint},
+  year         = {2014},
+  note         = {arXiv:1312.6114}
+}
+
+@inproceedings{fu2019cyclical,
+  title        = {Cyclical Annealing Schedule: A Simple Approach to Mitigating {KL} Vanishing},
+  author       = {Fu, Hao and Li, Chunyuan and Liu, Xiaodong and Gao, Jianfeng and Celikyilmaz, Asli and Carin, Lawrence},
+  booktitle    = {Proceedings of the 2019 Conference of the North American Chapter of the Association for Computational Linguistics (NAACL)},
+  year         = {2019}
+}
+
+@inproceedings{dieng2019skipvae,
+  title        = {Avoiding Latent Variable Collapse with Generative Skip Models},
+  author       = {Dieng, Adji B. and Kim, Yoon and Rush, Alexander M. and Blei, David M.},
+  booktitle    = {Proceedings of the 22nd International Conference on Artificial Intelligence and Statistics (AISTATS)},
+  year         = {2019}
+}
+\end{filecontents*}
+
+% Template notes (per project-format.pdf):
+% - Main content up to 6 pages (appendix + references unlimited).
+% - Avoid $$ ... $$ because it breaks line numbers.
+% - Table captions go above tables.
+
+\usepackage[margin=1in]{geometry}
+\usepackage{microtype}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{mathtools}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{caption}
+\usepackage{subcaption}
+
+% TikZ for plate + architecture diagrams
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,calc,fit,backgrounds}
+
+% Citations: use natbib for \citet / \citep style
+\usepackage[round,authoryear]{natbib}
+\bibliographystyle{plainnat}
+
+\title{Exploring Piano Music Generative Models (Hierarchical VAE, VAE, \& Transformer Baseline)}
+\author{Karandeep Shoker\\
+\texttt{kshoker1@student.ubc.ca}}
+\date{}
+
+\newcommand{\Bar}{\texttt{<Bar>}}
+\newcommand{\PAD}{\texttt{<PAD>}}
+\newcommand{\BOS}{\texttt{<BOS>}}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We study practical challenges in training controllable \emph{generative sequence models} for symbolic piano music under limited compute (single Kaggle T4) and long-range dependency constraints. We compare three architectures that share a common event-based tokenization and per-bar attribute controls: (1) a decoder-only Transformer baseline conditioned on attributes, (2) a non-hierarchical variational autoencoder (VAE) with a global latent code, and (3) a hierarchical VAE that uses a global latent to drive bar-level condition vectors via a conductor network. Our central technical theme is \emph{posterior collapse} in powerful autoregressive decoders and how architectural and objective-level interventions (FiLM-style in-attention conditioning at every layer, cyclical $\beta$-annealing, and KL free-bits) encourage the model to use a meaningful latent space while remaining controllable. We report reconstruction and KL bits/dim across train/validation/test for multiple checkpoints and summarize empirical trade-offs among fidelity, latent usage, and controllability. Our implementation details (tokenization, filtering, hyperparameters) are provided in the appendix.
+\end{abstract}
+
+\section{Introduction}
+Symbolic music generation can be cast as modeling a discrete sequence $X=(x_1,\dots,x_T)$ of musical events. Unlike text, musical sequences exhibit strong hierarchical structure (bars, beats, phrases) and long-range dependencies, while also benefiting from user-facing control (e.g., density or dynamics profiles across bars). In this project we focus on \emph{classical piano} generation from 8-bar chunks, and aim to support \emph{bar-wise controllability} with four interpretable attributes: polyphony rate, rhythmic intensity, velocity dynamics, and note density.
+
+The key difficulty is that high-capacity autoregressive decoders can fit local next-token statistics while ignoring latent variables, leading to posterior collapse in VAE-style models. At the same time, limited compute (single 16GB GPU) constrains model size, sequence length, and experiment throughput, making it important to pick interventions that work in practice.
+
+\paragraph{Contributions.}
+Our main contributions are:
+\begin{enumerate}[leftmargin=*,itemsep=0pt]
+  \item A controlled comparison of three sequence-modeling architectures for symbolic piano generation: a plain decoder-only Transformer baseline, a global-latent VAE, and a hierarchical VAE with a conductor producing bar-level conditions.
+  \item A conditioning design for controllability that concatenates bar-level latent and attribute embeddings into a shared per-bar condition vector $C_k=[z_k;A_k]$ with a fixed \emph{3:1} dimension split favoring musical content over low-level attributes, injected via FiLM-style modulation at every decoder layer and timestep.
+  \item A practical posterior-collapse mitigation stack (cyclical $\beta$-annealing, KL free bits, and skip-style repeated conditioning) and empirical training insights under Kaggle constraints.
+\end{enumerate}
+
+\section{Musical background (intuitive)}
+Our models operate on \emph{bars} (measures) as the core unit of musical time. Under a fixed $4/4$ time signature, a bar consists of four beats with a recurring strong--weak pattern that supports rhythmic motifs and phrase structure. We focus on 8-bar excerpts to capture short musical arcs (e.g., call-and-response or tension and release) while keeping sequence lengths feasible under limited compute.
+
+\paragraph{Why these attributes?}
+We expose four bar-wise control signals that are musically salient and easy to reason about:
+\begin{itemize}[leftmargin=*,itemsep=0pt]
+  \item \textbf{Polyphony rate:} harmonic ``thickness'' (chords vs.\ single notes).
+  \item \textbf{Rhythmic intensity:} how continuously active the bar is (onset activity).
+  \item \textbf{Velocity dynamics:} perceived loudness/energy (soft vs.\ loud playing).
+  \item \textbf{Note density:} overall event density (busy vs.\ sparse texture).
+\end{itemize}
+Each attribute is quantized into 8 ordinal bins $\{0,\dots,7\}$, enabling an intuitive ``slider'' control at inference time. Exact definitions and the quantization procedure are detailed in Appendix~A.
+
+\section{Pipeline overview}
+Figure~\ref{fig:pipeline} summarizes the end-to-end pipeline.
+\begin{enumerate}[leftmargin=*,itemsep=0pt]
+  \item \textbf{Data curation and filtering:} collect classical piano MIDI, filter to $4/4$, chunk into 8-bar excerpts, and apply strict quality filters.
+  \item \textbf{Tokenization:} convert each excerpt into an event sequence (REMI-style) with explicit \Bar boundaries and in-bar position tokens.
+  \item \textbf{Attribute extraction and quantization:} compute four per-bar descriptors and map each to 8 bins via global training-set quantiles.
+  \item \textbf{Training:} train one of the three generative models with teacher forcing using PAD-masked cross-entropy; for VAE variants, optimize an ELBO with KL regularization and collapse-mitigation techniques.
+  \item \textbf{Inference:} choose a model family and bar-wise attribute bins; sample a global latent (for VAEs), generate tokens autoregressively, switching the active bar condition when the model emits \Bar.
+\end{enumerate}
+
+\begin{figure}[t]
+\caption{End-to-end pipeline for controllable symbolic piano generation. Attributes are computed per bar, quantized to 8 bins, and injected into each model as bar-aligned conditions via \texttt{bar\_indices}.}
+\label{fig:pipeline}
+\centering
+\begin{tikzpicture}[>=Latex, node distance=10pt, every node/.style={font=\small}]
+  \node[rectangle,draw,rounded corners,minimum width=2.4cm,minimum height=0.8cm] (data) {MIDI dataset};
+  \node[rectangle,draw,rounded corners,minimum width=2.8cm,minimum height=0.8cm, right=10pt of data] (prep) {Filter \& chunk\\(8 bars)};
+  \node[rectangle,draw,rounded corners,minimum width=2.6cm,minimum height=0.8cm, right=10pt of prep] (tok) {Tokenize\\(REMI events)};
+  \node[rectangle,draw,rounded corners,minimum width=2.8cm,minimum height=0.8cm, right=10pt of tok] (attr) {Attrs per bar\\$\rightarrow$ bins 0--7};
+  \node[rectangle,draw,rounded corners,minimum width=2.4cm,minimum height=0.8cm, right=10pt of attr] (train) {Train model};
+  \node[rectangle,draw,rounded corners,minimum width=2.6cm,minimum height=0.8cm, below=14pt of train] (infer) {Inference\\(controls + sampling)};
+
+  \draw[->] (data) -- (prep);
+  \draw[->] (prep) -- (tok);
+  \draw[->] (tok) -- (attr);
+  \draw[->] (attr) -- (train);
+  \draw[->] (train) -- (infer);
+  \draw[->] (attr) |- (infer);
+\end{tikzpicture}
+\end{figure}
+
+\section{Related Work}
+\paragraph{MusicVAE.}
+\citet{roberts2018musicvae} introduced MusicVAE, emphasizing that long sequences and autoregressive decoders exacerbate posterior collapse. Their hierarchical decoder design encourages the latent code to represent long-term structure while the decoder focuses on local details.
+
+\paragraph{MuseMorphose.}
+MuseMorphose combines a Transformer VAE with \emph{in-attention} conditioning to enforce time-varying, bar-level control \citep{wu2021musemorphose}. It provides a concrete recipe for (i) bar-structured event tokenization, (ii) injecting bar-level conditions throughout attention blocks, and (iii) objective-level tricks such as cyclical KL annealing and free bits to stabilize latent usage.
+
+\paragraph{Hierarchical transformer VAEs for music.}
+EmoMusicTV proposes a hierarchical latent variable structure (piece-level and bar-level latents) and argues that bar-level dependencies matter for coherent multi-bar generation \citep{ji2024emomusictv}. While their focus is emotion-conditioned lead sheets, the underlying point transfers: segment-level latents should reflect cross-segment context to avoid discontinuities.
+
+\section{Data and Representation}
+\subsection{Datasets}
+We train on $\approx 500$ hours of curated classical piano from MAESTRO and GiantMIDI-Piano, filtered to $4/4$ (including equivalent $2/4$ and $2/2$). We split data into train/validation/test with an $80/10/10$ ratio.
+
+\subsection{Preprocessing and chunking}
+We tokenize pieces and then slice into fixed 8-bar chunks. To improve data quality and reduce degenerate examples, we apply strict chunk filtering, keeping a chunk only if it satisfies: (i) at least 6 of 8 bars have nonzero density, (ii) total onsets across bars $\ge 40$, (iii) fewer than two leading silent bars, and (iv) mean rhythmic intensity $\ge 0.10$.
+
+We set a maximum block size of 1024 tokens (some experiments use 650). Chunks shorter than the block size are padded with \PAD; chunks longer than block size are dropped to ensure sequences end naturally on \Bar. Full filtering thresholds and preprocessing details are provided in Appendix~A.
+
+\subsection{Tokenization and vocabulary}
+We use an event-based REMI-style representation via \texttt{miditok}, with a fixed vocabulary of 195 tokens. Tokens include \Bar, position-in-bar events, pitch, velocity, tempo, duration, as well as \BOS and \PAD. This representation aligns naturally with bars, enabling per-bar conditioning and a clear boundary token (\Bar) to switch conditions during decoding. A compact token table and tokenizer configuration are included in Appendix~A.
+
+\subsection{Controllable attributes}
+For each bar we compute four attributes from raw MIDI: polyphony rate, rhythmic intensity, velocity dynamics, and note density. We bin each attribute into 8 discrete levels $\{0,\dots,7\}$ using global quantiles computed on the filtered training set. At training and inference time, users supply these bins per bar; the model learns embeddings for each attribute bin and uses them as control knobs.
+
+\section{Models}
+All models operate on token sequences and use teacher forcing during training. The primary architectural axis is whether (and how) the model uses latent variables to represent high-level musical structure beyond local autoregressive context.
+
+\subsection{Graphical model view}
+Figure~\ref{fig:plates} provides plate-diagram summaries of the three probabilistic models we compare.
+
+\begin{figure}[t]
+\caption{Plate diagrams for the three models. Left: plain autoregressive decoder conditioned on attributes. Middle: VAE with a single global latent $z_p$. Right: hierarchical VAE where a global latent $z_p$ deterministically induces bar-level conditions $\{z_k\}$ used by the decoder.}
+\label{fig:plates}
+\centering
+\begin{subfigure}[t]{0.32\linewidth}
+\centering
+\begin{tikzpicture}[>=Latex, node distance=6pt, every node/.style={font=\small}]
+  \node[circle,draw,minimum size=14pt] (x) {$x_t$};
+  \node[circle,draw,minimum size=14pt,left=12pt of x] (prev) {$x_{<t}$};
+  \node[rectangle,draw,rounded corners,minimum height=14pt,minimum width=18pt,below=12pt of x] (a) {$A_{k(t)}$};
+  \draw[->] (prev) -- (x);
+  \draw[->] (a) -- (x);
+  \node[draw,rectangle,rounded corners,fit=(x)(prev)(a),inner sep=8pt,label=below:Plain] {};
+\end{tikzpicture}
+\end{subfigure}\hfill
+\begin{subfigure}[t]{0.32\linewidth}
+\centering
+\begin{tikzpicture}[>=Latex, node distance=6pt, every node/.style={font=\small}]
+  \node[circle,draw,minimum size=14pt] (z) {$z_p$};
+  \node[circle,draw,minimum size=14pt,right=16pt of z] (x) {$x_{1:T}$};
+  \node[rectangle,draw,rounded corners,minimum height=14pt,minimum width=18pt,below=12pt of x] (a) {$A_{1:K}$};
+  \draw[->] (z) -- (x);
+  \draw[->] (a) -- (x);
+  \node[draw,rectangle,rounded corners,fit=(z)(x)(a),inner sep=8pt,label=below:VAE] {};
+\end{tikzpicture}
+\end{subfigure}\hfill
+\begin{subfigure}[t]{0.32\linewidth}
+\centering
+\begin{tikzpicture}[>=Latex, node distance=6pt, every node/.style={font=\small}]
+  \node[circle,draw,minimum size=14pt] (zp) {$z_p$};
+  \node[circle,draw,minimum size=14pt,below=10pt of zp] (zk) {$z_{1:K}$};
+  \node[circle,draw,minimum size=14pt,right=18pt of zk] (x) {$x_{1:T}$};
+  \node[rectangle,draw,rounded corners,minimum height=14pt,minimum width=18pt,below=12pt of x] (a) {$A_{1:K}$};
+  \draw[->] (zp) -- (zk);
+  \draw[->] (zk) -- (x);
+  \draw[->] (a) -- (x);
+  \node[draw,rectangle,rounded corners,fit=(zp)(zk)(x)(a),inner sep=8pt,label=below:Hier.~VAE] {};
+\end{tikzpicture}
+\end{subfigure}
+\end{figure}
+
+\subsection{Plain Transformer baseline (decoder-only)}
+The baseline models the autoregressive likelihood
+\[
+  p_\theta(X\mid A)=\prod_{t=1}^{T} p_\theta(x_t \mid x_{<t}, A_{k(t)}),
+\]
+where $A_{k(t)}$ denotes the bar-level attribute embedding associated with timestep $t$ via the precomputed bar index $k(t)$. This model contains no latent variables, and therefore cannot suffer posterior collapse, but may struggle to represent global structure beyond its context window.
+
+\begin{figure}[t]
+\caption{Plain Transformer baseline (decoder-only) architecture, matching \texttt{PlainTransformerDecoder} in \texttt{plain\_transformer.py}. Per-bar attribute bins are embedded and projected to the model dimension, then broadcast to token timesteps via \texttt{bar\_indices}. Each decoder block applies FiLM modulation (per-timestep $\gamma,\beta$) before causal self-attention.}
+\label{fig:arch-plain}
+\centering
+\begin{tikzpicture}[>=Latex, node distance=10pt, every node/.style={font=\small}]
+  \node[rectangle,draw,rounded corners,minimum width=2.2cm,minimum height=0.8cm] (X) {Tokens $X$};
+  \node[rectangle,draw,rounded corners,minimum width=2.4cm,minimum height=0.8cm, right=12pt of X] (emb) {Tok+Pos\\Embedding};
+  \node[rectangle,draw,rounded corners,minimum width=2.4cm,minimum height=0.8cm, right=12pt of emb] (blocks) {$N$ FiLM blocks\\(causal)};
+  \node[rectangle,draw,rounded corners,minimum width=2.0cm,minimum height=0.8cm, right=12pt of blocks] (head) {Linear+Softmax};
+
+  \node[rectangle,draw,rounded corners,minimum width=2.4cm,minimum height=0.8cm, below=14pt of emb] (attrs) {Attr bins\\$[B,8,4]$};
+  \node[rectangle,draw,rounded corners,minimum width=2.8cm,minimum height=0.8cm, below=14pt of blocks] (condbars) {Embed+concat\\$\rightarrow$ proj to $d$};
+  \node[rectangle,draw,rounded corners,minimum width=2.8cm,minimum height=0.8cm, below=14pt of head] (condtok) {Broadcast by\\\texttt{bar\_indices}};
+
+  \draw[->] (X) -- (emb);
+  \draw[->] (emb) -- (blocks);
+  \draw[->] (blocks) -- (head);
+
+  \draw[->] (attrs) -- (condbars);
+  \draw[->] (condbars) -- (condtok);
+  \draw[->] (condtok) |- node[pos=0.25, right]{FiLM $\gamma,\beta$} (blocks);
+\end{tikzpicture}
+\end{figure}
+
+\subsection{Non-hierarchical VAE (global latent)}
+The VAE introduces a global latent $z_p$ with prior $p(z_p)=\mathcal{N}(0,I)$, approximate posterior $q_\phi(z_p\mid X)$, and conditional decoder likelihood $p_\theta(X\mid z_p,A)$. In our \emph{simple} VAE implementation (\texttt{SimpleMusicVAE} in \texttt{simple\_vae.py}), $z_p$ is projected to a global decoder-aligned vector $z_g\in\mathbb{R}^{384}$ and repeated across bars. Training maximizes an ELBO:
+\[
+  \mathcal{L}_{\mathrm{ELBO}}
+  = \mathbb{E}_{q_\phi(z_p\mid X)}\big[\log p_\theta(X\mid z_p,A)\big]
+  - \beta\, D_{\mathrm{KL}}\!\left(q_\phi(z_p\mid X)\,\|\,p(z_p)\right).
+\]
+
+\begin{figure}[t]
+\caption{Simple VAE architecture (non-hierarchical), matching \texttt{SimpleMusicVAE} in \texttt{simple\_vae.py}. A bidirectional Transformer encoder produces $(\mu,\log\sigma^2)$ for $z_p$, which is reparameterized then projected to $z_g$ and repeated across bars. Per-bar conditions $C_k=[z_g;A_k]$ are broadcast to tokens and injected via FiLM into every decoder layer.}
+\label{fig:arch-simple}
+\centering
+\begin{tikzpicture}[>=Latex, node distance=10pt, every node/.style={font=\small}]
+  \node[rectangle,draw,rounded corners,minimum width=2.2cm,minimum height=0.8cm] (X) {Tokens $X$};
+  \node[rectangle,draw,rounded corners,minimum width=2.6cm,minimum height=0.8cm, right=12pt of X] (enc) {Bi-Transformer\\Encoder};
+  \node[rectangle,draw,rounded corners,minimum width=2.2cm,minimum height=0.8cm, right=12pt of enc] (mu) {$\mu,\log\sigma^2$};
+  \node[circle,draw,minimum size=18pt, right=12pt of mu] (zp) {$z_p$};
+  \node[rectangle,draw,rounded corners,minimum width=1.8cm,minimum height=0.8cm, right=12pt of zp] (proj) {$z_g$ proj};
+  \node[rectangle,draw,rounded corners,minimum width=2.4cm,minimum height=0.8cm, right=12pt of proj] (dec) {FiLM Decoder\\(causal)};
+  \node[rectangle,draw,rounded corners,minimum width=2.0cm,minimum height=0.8cm, right=12pt of dec] (out) {Logits};
+
+  \node[rectangle,draw,rounded corners,minimum width=2.2cm,minimum height=0.8cm, below=14pt of proj] (attrs) {Attr bins\\$A_{1:K}$};
+  \node[rectangle,draw,rounded corners,minimum width=2.2cm,minimum height=0.8cm, below=14pt of dec] (ck) {$C_k=[z_g;A_k]$};
+
+  \draw[->] (X) -- (enc);
+  \draw[->] (enc) -- (mu);
+  \draw[->] (mu) -- node[midway,above]{reparam} (zp);
+  \draw[->] (zp) -- (proj);
+  \draw[->] (proj) -- (dec);
+  \draw[->] (dec) -- (out);
+  \draw[->] (attrs) -- (ck);
+  \draw[->] (proj) |- (ck);
+  \draw[->] (ck) -- node[midway,right]{broadcast \& FiLM} (dec);
+\end{tikzpicture}
+\end{figure}
+
+\subsection{Hierarchical VAE (global-to-bar latent via conductor)}
+Our primary model uses a single global latent $z_p$ inferred from the entire 8-bar chunk, then produces a deterministic sequence of bar-level latent vectors $(z_1,\dots,z_8)$ using a conductor network (2-layer GRU). The decoder conditions on per-bar vectors
+\[
+  C_k = [z_k; A_k]\in\mathbb{R}^{512},
+\]
+with a fixed 3:1 dimensional ratio between $z_k\in\mathbb{R}^{384}$ and $A_k\in\mathbb{R}^{128}$. Conditioning is injected via FiLM-style modulation at every decoder layer and timestep, which acts like a skip-conditioning path and makes it harder for the decoder to ignore $C_k$.
+
+\begin{figure}[t]
+\caption{Hierarchical VAE architecture, matching \texttt{MusicVAE} in \texttt{vae.py}. A global latent $z_p$ is inferred by a bidirectional encoder, then a GRU conductor generates a bar-level sequence $z_k$. Attributes embed to $A_k$ and we form $C_k=[z_k;A_k]$ with a 3:1 split (384:128) before broadcasting to tokens and injecting via FiLM into every decoder layer.}
+\label{fig:arch-hier}
+\centering
+\begin{tikzpicture}[>=Latex, node distance=10pt, every node/.style={font=\small}]
+  \node[rectangle,draw,rounded corners,minimum width=2.2cm,minimum height=0.8cm] (X) {Tokens $X$};
+  \node[rectangle,draw,rounded corners,minimum width=2.6cm,minimum height=0.8cm, right=12pt of X] (enc) {Bi-Transformer\\Encoder};
+  \node[rectangle,draw,rounded corners,minimum width=2.2cm,minimum height=0.8cm, right=12pt of enc] (mu) {$\mu,\log\sigma^2$};
+  \node[circle,draw,minimum size=18pt, right=12pt of mu] (zp) {$z_p$};
+  \node[rectangle,draw,rounded corners,minimum width=2.4cm,minimum height=0.8cm, right=12pt of zp] (cond) {GRU\\Conductor};
+  \node[rectangle,draw,rounded corners,minimum width=2.4cm,minimum height=0.8cm, right=12pt of cond] (dec) {FiLM Decoder\\(causal)};
+  \node[rectangle,draw,rounded corners,minimum width=2.0cm,minimum height=0.8cm, right=12pt of dec] (out) {Logits};
+
+  \node[rectangle,draw,rounded corners,minimum width=2.2cm,minimum height=0.8cm, below=14pt of cond] (attrs) {Attr bins\\$A_{1:K}$};
+  \node[rectangle,draw,rounded corners,minimum width=2.2cm,minimum height=0.8cm, below=14pt of dec] (ck) {$C_k=[z_k;A_k]$};
+
+  \draw[->] (X) -- (enc);
+  \draw[->] (enc) -- (mu);
+  \draw[->] (mu) -- node[midway,above]{reparam} (zp);
+  \draw[->] (zp) -- (cond);
+  \draw[->] (cond) -- node[midway,above]{$z_k$ seq} (dec);
+  \draw[->] (dec) -- (out);
+
+  \draw[->] (attrs) -- (ck);
+  \draw[->] (cond) |- (ck);
+  \draw[->] (ck) -- node[midway,right]{broadcast \& FiLM} (dec);
+\end{tikzpicture}
+\end{figure}
+
+\subsection{Architecture diagrams}
+Figure~\ref{fig:arch} summarizes the encoder--conductor--decoder dataflow used by our hierarchical VAE (and highlights where per-bar controls enter).
+
+\begin{figure}[t]
+\caption{High-level architecture of the hierarchical VAE. The encoder infers a global latent $z_p$ from the full token sequence; the conductor expands $z_p$ into bar-level vectors $z_k$; attribute embeddings $A_k$ are concatenated to form $C_k=[z_k;A_k]$ and injected via FiLM into every decoder layer/timestep.}
+\label{fig:arch}
+\centering
+\begin{tikzpicture}[>=Latex, node distance=10pt, every node/.style={font=\small}]
+  \node[rectangle,draw,rounded corners,minimum width=2.2cm,minimum height=0.8cm] (tokens) {Tokens $X$};
+  \node[rectangle,draw,rounded corners,minimum width=2.4cm,minimum height=0.8cm, right=18pt of tokens] (enc) {Bi-Transformer\\Encoder $q_\phi$};
+  \node[circle,draw,minimum size=18pt, right=18pt of enc] (zp) {$z_p$};
+  \node[rectangle,draw,rounded corners,minimum width=2.4cm,minimum height=0.8cm, right=18pt of zp] (cond) {GRU Conductor\\$z_p\!\rightarrow\!\{z_k\}$};
+  \node[rectangle,draw,rounded corners,minimum width=2.4cm,minimum height=0.8cm, right=18pt of cond] (dec) {Causal Transformer\\Decoder $p_\theta$};
+  \node[rectangle,draw,rounded corners,minimum width=2.2cm,minimum height=0.8cm, right=18pt of dec] (out) {Next-token\\distribution};
+
+  \node[rectangle,draw,rounded corners,minimum width=2.2cm,minimum height=0.8cm, below=18pt of cond] (attr) {Attr bins\\$A_{1:K}$};
+  \node[rectangle,draw,rounded corners,minimum width=2.0cm,minimum height=0.8cm, below=18pt of dec] (ck) {$C_k=[z_k;A_k]$};
+
+  \draw[->] (tokens) -- (enc);
+  \draw[->] (enc) -- (zp);
+  \draw[->] (zp) -- (cond);
+  \draw[->] (cond) -- (dec);
+  \draw[->] (dec) -- (out);
+  \draw[->] (attr) -- (ck);
+  \draw[->] (cond) -- (ck);
+  \draw[->] (ck) -- node[midway, right]{FiLM to all layers} (dec);
+\end{tikzpicture}
+\end{figure}
+
+\section{Training Objective and Posterior Collapse}
+\subsection{Reconstruction and KL}
+We train with PAD-masked token cross-entropy reconstruction and a KL regularizer on the global latent. In practice, strong autoregressive decoders can minimize reconstruction loss without using the latent, leading to posterior collapse where $q_\phi(z_p\mid X)\approx p(z_p)$ and KL $\to 0$.
+
+\paragraph{What collapses in practice?}
+In training logs, collapse manifests as near-zero KL and an encoder whose output distribution becomes indistinguishable from the prior, even though the decoder continues to improve reconstruction. This is especially likely when the decoder is powerful (deep Transformer) and trained with teacher forcing, since $x_{<t}$ already provides a strong predictive signal for $x_t$.
+
+\subsection{Objective: ELBO with $\beta$-weighting}
+For VAE variants, we optimize an ELBO-style objective:
+\[
+  \mathcal{L}_{\text{total}} = \mathcal{L}_{\text{recon}} + \beta\, \mathcal{L}_{\text{KL}},
+\]
+where $\mathcal{L}_{\text{recon}}$ is PAD-masked cross-entropy and $\mathcal{L}_{\text{KL}} = D_{\text{KL}}(q_\phi(z_p\mid X)\,\|\,p(z_p))$.
+
+\subsection{Mitigation stack}
+We employ three complementary mechanisms:
+\begin{enumerate}[leftmargin=*,itemsep=0pt]
+  \item \textbf{Cyclical $\beta$-annealing:} periodically ramp $\beta$ from 0 to a small maximum to reintroduce KL pressure after the decoder learns reasonable reconstructions.
+  \item \textbf{KL free bits (per-dimension hinge):} allow each latent dimension a minimum information budget before penalization.
+  \item \textbf{Repeated conditioning (FiLM at every layer):} inject the condition into every decoder block and timestep, making it difficult for the decoder to ignore the latent signal.
+\end{enumerate}
+
+\paragraph{Free bits as implemented.}
+We use a stable free-bits variant that hinges the KL \emph{after} averaging across the batch, per latent dimension (matching \texttt{kl\_divergence\_free\_bits} in \texttt{vae.py} and \texttt{simple\_vae.py}). Let $\mathrm{KL}_i$ denote the batch-mean KL for latent dimension $i$ (in nats). With a free-bits threshold $\lambda$ (specified in bits and converted to nats), the hinged KL is:
+\[
+  \mathcal{L}_{\text{KL}} = \sum_{i=1}^{d_z} \max(\mathrm{KL}_i, \lambda).
+\]
+Intuitively, this prevents the optimizer from collapsing dimensions whose KL is below the budget, encouraging the model to use the latent space.
+
+\paragraph{Why FiLM everywhere helps.}
+In our models, the per-token condition (broadcast from bar-level $C_k$ via \texttt{bar\_indices}) produces FiLM parameters $(\gamma,\beta)$ inside every decoder block before attention:
+\[
+  \tilde{h} = h \odot (1+\gamma) + \beta,
+\]
+which acts like a skip-conditioning path. This is analogous in spirit to Skip-VAE style conditioning \citep{dieng2019skipvae}: the latent-derived condition influences \emph{all} layers and timesteps rather than only an initial state, reducing the chance the decoder can route around it.
+
+\section{Experiments and Results (Snapshot)}
+We evaluate models using reconstruction loss and KL bits/dim on train/validation/test splits. Table~\ref{tab:snapshots} summarizes key checkpoints. These results are an intermediate snapshot; additional controllability and latent-structure analyses are listed as TODOs for final evaluation.
+
+\paragraph{Interpreting reconstruction vs.\ KL bits/dim.}
+Reconstruction loss summarizes next-token predictive accuracy under teacher forcing (lower is better). KL bits/dim measures how much information the encoder places into the latent space on average; in the VAE setting, non-trivial KL bits/dim is a proxy that the decoder is not fully ignoring the latent code. However, high KL alone is not sufficient: we care about the \emph{joint} regime of (i) low recon and (ii) stable KL that does not collapse to zero.
+
+\paragraph{Trends across architectures.}
+The plain decoder baseline is competitive in reconstruction while having no KL term. The VAE-family models trade reconstruction for a structured latent space that supports controllability and latent-space operations. Among VAEs, the hierarchical model tends to achieve lower reconstruction at similar KL usage, consistent with the intuition that bar-level conditioning vectors $z_k$ provide a more direct path for high-level information to influence token-level generation.
+
+\begin{table}[t]
+\caption{Model evaluation snapshots (lower recon is better; higher KL bits/dim indicates more latent usage for VAEs).}
+\label{tab:snapshots}
+\centering
+\small
+\begin{tabular}{l l r r r r r r r r r}
+\toprule
+Model & Architecture & Block & Batch & Iters & Train recon & Train KL & Val recon & Val KL & Test recon & Test KL \\
+\midrule
+VAE v4 & Hierarchical VAE & 650 & TBD & 80k & 1.6527 & 0.917 & 1.7052 & 0.916 & 1.7385 & 0.916 \\
+VAE v3 & Hierarchical VAE & 1024 & 16 & 50k & 1.6213 & 0.861 & 1.6930 & 0.859 & 1.6921 & 0.859 \\
+VAE v2 & Hierarchical VAE & 1024 & 40 & 20k & 1.7124 & 0.729 & 1.7735 & 0.729 & 1.7375 & 0.730 \\
+VAE v1 & Hierarchical VAE & 1024 & 16 & 10k & 1.9025 & 0.721 & 1.9083 & 0.724 & 1.9005 & 0.724 \\
+Simple v1 & Simple VAE & 1024 & 16 & 10k & 1.9947 & 0.788 & 1.9566 & 0.804 & 1.9391 & 0.800 \\
+Plain v4 & Plain decoder & 650 & 16 & 80k & 1.7006 & -- & 1.7181 & -- & 1.7132 & -- \\
+Plain v3 & Plain decoder & 1024 & 15 & 50k & 1.8028 & -- & 1.7071 & -- & 1.7740 & -- \\
+Plain v2 & Plain decoder & 1024 & 40 & 20k & 1.7721 & -- & 1.7827 & -- & 1.7672 & -- \\
+Plain v1 & Plain decoder & 1024 & 16 & 10k & 2.0268 & -- & 1.9558 & -- & 1.9447 & -- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Planned analyses (TODO).}
+We plan to add: (i) controllability tests (correlation between input bin and measured attribute on generated MIDI), (ii) latent-space visualization (UMAP/t-SNE over $z_p$ colored by composer or computed descriptors), and (iii) qualitative listening study or curated audio/MIDI examples.
+
+\section{Controllability}
+\subsection{Quantized control signals}
+We define four bar-wise attributes (polyphony, rhythmic intensity, velocity dynamics, note density) and map each to an ordinal bin in $\{0,\dots,7\}$ using global training-set quantiles. This design provides two benefits: (i) the discrete bins are intuitive user controls (sliders), and (ii) the model can learn a compact embedding per bin.
+
+\subsection{How bar-wise control enters the models}
+All three models use \texttt{bar\_indices} to align bar-level controls with token timesteps. Let $k(t)\in\{1,\dots,K\}$ be the bar index of timestep $t$. We compute per-bar attribute embeddings $A_k$ and broadcast them to per-token conditioning vectors using a gather operation (see \texttt{broadcast\_by\_bar\_indices} in \texttt{vae.py} / \texttt{simple\_vae.py} and the analogous logic in \texttt{plain\_transformer.py}). In the plain baseline, the attribute-only condition is sufficient. In the VAE variants, we form a combined condition $C_k=[z_k;A_k]$ (hierarchical) or $C_k=[z_g;A_k]$ (simple), then broadcast to tokens and inject via FiLM in every decoder block.
+
+\subsection{Validation protocol (planned)}
+To quantify controllability, for each attribute we will generate samples across bins 0--7 and measure the corresponding descriptor on the generated MIDI, then compute correlation (Pearson/Spearman) between requested bins and measured values. This evaluates whether the attribute embeddings act as monotonic control knobs with minimal cross-attribute side effects.
+
+\section{Discussion and Future Work}
+Our experiments suggest that combining hierarchical conditioning (global-to-bar conductor) with strong, repeated conditioning in the decoder can preserve latent usage (non-trivial KL bits/dim) while maintaining reconstruction quality comparable to a strong decoder-only baseline. The remaining challenge is to quantify \emph{musical} improvements (coherence, structure, perceived quality) beyond reconstruction metrics and to validate controllability with targeted tests.
+
+\paragraph{Limitations.}
+Current evaluation emphasizes reconstruction and KL bits/dim, which are necessary but not sufficient to establish musical quality. Additionally, some checkpoints differ in block size, complicating direct comparisons.
+
+\paragraph{Future work.}
+Add robust controllability metrics, latent topology analysis, and human evaluation; explore improved priors and decoding strategies (e.g., constrained sampling, MCTS-guided generation) as well as disentanglement via adversarial objectives.
+
+\clearpage
+\appendix
+\section{Implementation details}
+\subsection{Tokenizer configuration}
+We use a REMI-style tokenizer (via \texttt{miditok}) with a fixed vocabulary of 195 tokens. The representation includes explicit bar boundaries (\Bar) and in-bar position tokens, which makes it natural to define bar-aligned conditions and switch them during decoding.
+
+\subsection{Dataset filtering}
+We apply strict filtering on candidate 8-bar chunks to remove degenerate examples dominated by silence or extremely low rhythmic activity. This reduces mode collapse onto trivial patterns and improves the learning signal per batch.
+
+\subsection{Attributes and binning}
+We compute four per-bar descriptors (polyphony rate, rhythmic intensity, velocity dynamics, note density) and bin each into 8 discrete classes using global quantiles computed on the filtered training set. At training time, the model consumes only the binned labels; the raw descriptor computation is offline.
+
+\section{Model hyperparameters (summary)}
+All major hyperparameters are specified in \texttt{technical-specification.md}. The main architectural constants used throughout are:
+\begin{itemize}[leftmargin=*,itemsep=0pt]
+  \item Decoder hidden size $d=512$, $6$ layers, $8$ heads, FFN size $2048$, dropout $0.1$.
+  \item Global latent dimension $\dim(z_p)=128$.
+  \item Hierarchical conductor hidden size $384$ (2-layer GRU) producing 8 bar-level vectors $z_k\in\mathbb{R}^{384}$.
+  \item Attribute embedding: 4 attributes $\times$ 32 dims = $A_k\in\mathbb{R}^{128}$.
+  \item Condition vector: $C_k=[z_k;A_k]\in\mathbb{R}^{512}$ (3:1 split).
+\end{itemize}
+
+\section{Additional planned evaluations (TODO)}
+\begin{itemize}[leftmargin=*,itemsep=0pt]
+  \item \textbf{Controllability:} for each attribute, generate samples across bins 0--7 and compute Pearson/Spearman correlation between requested bins and measured descriptors from generated MIDI.
+  \item \textbf{Latent topology:} UMAP/t-SNE over inferred $z_p$ for test-set examples; color by composer metadata (if available) or by computed musical statistics.
+  \item \textbf{Qualitative:} curated MIDI/audio examples demonstrating bar-wise control (two-phase UI) and long-range coherence.
+\end{itemize}
+
+\bibliography{refs}
+\end{document}
+

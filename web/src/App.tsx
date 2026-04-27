@@ -44,6 +44,54 @@ const MODEL_VERSIONS: Record<ModelFamily, ModelVersionSpec[]> = {
   ],
 };
 
+/** Parse RunPod runsync JSON → MIDI bytes (flat `output.midi_b64` or legacy `output.output.midi_b64`). */
+function midiFromRunpodResponse(data: unknown): { buf: ArrayBuffer } | { err: string } {
+  if (!data || typeof data !== "object") return { err: "Invalid response JSON." };
+  const root = data as Record<string, unknown>;
+
+  if (typeof root.error === "string") {
+    const det = root.detail != null ? ` ${JSON.stringify(root.detail)}` : "";
+    return { err: `${root.error}${det}` };
+  }
+
+  const out = root.output;
+  if (!out || typeof out !== "object") return { err: "Missing output in RunPod response." };
+  const o = out as Record<string, unknown>;
+
+  if (typeof o.error === "string") {
+    const det = o.detail != null ? ` ${JSON.stringify(o.detail)}` : "";
+    return { err: `${o.error}${det}` };
+  }
+
+  let b64 = typeof o.midi_b64 === "string" ? o.midi_b64 : "";
+  if (!b64 && o.output && typeof o.output === "object") {
+    const inner = o.output as Record<string, unknown>;
+    if (typeof inner.midi_b64 === "string") b64 = inner.midi_b64;
+    if (!b64 && typeof inner.error === "string") {
+      const det = inner.detail != null ? ` ${JSON.stringify(inner.detail)}` : "";
+      return { err: `${inner.error}${det}` };
+    }
+  }
+
+  if (!b64 && typeof root.status === "string" && root.status !== "COMPLETED") {
+    if (root.status === "FAILED" || root.status === "CANCELLED" || root.status === "TIMED_OUT") {
+      return { err: `RunPod status: ${root.status}` };
+    }
+  }
+
+  if (!b64) return { err: "No midi_b64 in RunPod output." };
+
+  try {
+    const bin = atob(b64);
+    const buf = new ArrayBuffer(bin.length);
+    const view = new Uint8Array(buf);
+    for (let i = 0; i < bin.length; i++) view[i] = bin.charCodeAt(i);
+    return { buf };
+  } catch {
+    return { err: "Failed to decode base64 MIDI." };
+  }
+}
+
 function GlassCard({
   title,
   subtitle,
@@ -414,7 +462,7 @@ export default function App() {
                       ].join(" ")}
                       onClick={async () => {
                         setReqState("generating");
-                        setStatus("Calling API… this can take a bit.");
+                        setStatus("Calling RunPod… this can take a few minutes on cold start.");
 
                         if (downloadUrl) URL.revokeObjectURL(downloadUrl);
                         setDownloadUrl(null);
@@ -423,14 +471,16 @@ export default function App() {
                         stopPlayback();
 
                         try {
-                          const base = import.meta.env.VITE_API_BASE_URL as string | undefined;
-                          const apiKey = import.meta.env.VITE_API_KEY as string | undefined;
-                          if (!base) throw new Error("Missing VITE_API_BASE_URL (set at build time).");
-                          if (!apiKey) throw new Error("Missing VITE_API_KEY (set at build time).");
+                          const endpointId = import.meta.env.VITE_RUNPOD_ENDPOINT_ID as string | undefined;
+                          const runpodKey = import.meta.env.VITE_RUNPOD_API_KEY as string | undefined;
+                          if (!endpointId?.trim())
+                            throw new Error("Missing VITE_RUNPOD_ENDPOINT_ID (set at build time).");
+                          if (!runpodKey?.trim())
+                            throw new Error("Missing VITE_RUNPOD_API_KEY (set at build time).");
 
-                          const url = `${base.replace(/\/$/, "")}/generate`;
+                          const url = `https://api.runpod.ai/v2/${endpointId.trim()}/runsync`;
                           const controller = new AbortController();
-                          const t = window.setTimeout(() => controller.abort(), 120_000);
+                          const t = window.setTimeout(() => controller.abort(), 300_000);
 
                           let res: Response;
                           try {
@@ -438,17 +488,20 @@ export default function App() {
                               method: "POST",
                               headers: {
                                 "Content-Type": "application/json",
-                                "X-API-Key": apiKey,
+                                Authorization: `Bearer ${runpodKey.trim()}`,
                               },
                               body: JSON.stringify({
-                                model_type: selectedVersion.model_type,
-                                attributes: attributesPreview,
-                                seed,
-                                temperature,
-                                top_p: topP,
-                                block_size: selectedVersion.block_size,
-                                bars_per_sample: 8,
-                                ckpt_path: selectedVersion.ckpt_path,
+                                input: {
+                                  endpoint: "generate",
+                                  model_type: selectedVersion.model_type,
+                                  attributes: attributesPreview,
+                                  seed,
+                                  temperature,
+                                  top_p: topP,
+                                  block_size: selectedVersion.block_size,
+                                  bars_per_sample: 8,
+                                  ckpt_path: selectedVersion.ckpt_path,
+                                },
                               }),
                               signal: controller.signal,
                             });
@@ -456,15 +509,27 @@ export default function App() {
                             window.clearTimeout(t);
                           }
 
-                          if (!res.ok) {
-                            const txt = await res.text().catch(() => "");
-                            throw new Error(`API error ${res.status}: ${txt || res.statusText}`);
+                          const rawText = await res.text();
+                          let data: unknown;
+                          try {
+                            data = rawText ? JSON.parse(rawText) : {};
+                          } catch {
+                            throw new Error(`RunPod returned non-JSON (${res.status}): ${rawText.slice(0, 500)}`);
                           }
 
-                          setStatus("Downloading MIDI…");
-                          const blob = await res.blob();
-                          const buf = await blob.arrayBuffer();
-                          const dl = URL.createObjectURL(blob);
+                          if (!res.ok) {
+                            const msg =
+                              typeof data === "object" && data !== null && "message" in data
+                                ? String((data as Record<string, unknown>).message)
+                                : rawText.slice(0, 500);
+                            throw new Error(`RunPod HTTP ${res.status}: ${msg || res.statusText}`);
+                          }
+
+                          setStatus("Decoding MIDI…");
+                          const parsed = midiFromRunpodResponse(data);
+                          if ("err" in parsed) throw new Error(parsed.err);
+                          const buf = parsed.buf;
+                          const dl = URL.createObjectURL(new Blob([buf], { type: "audio/midi" }));
 
                           setMidiArrayBuffer(buf);
                           setDownloadUrl(dl);

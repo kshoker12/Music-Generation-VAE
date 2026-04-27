@@ -1,0 +1,10 @@
+runpod
+
+# Tokenizer / detokenization
+miditok>=3.0.0
+
+# GPU torch wheel selection is controlled by the extra-index-url below.
+# For CUDA 12.1 base images, cu121 wheels usually work.
+--extra-index-url https://download.pytorch.org/whl/cu121
+torch>=2.4,<3
+

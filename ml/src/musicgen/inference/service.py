@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from dataclasses import dataclass
 from threading import Lock
 from typing import Literal, Optional
@@ -33,6 +34,27 @@ def _default_ckpt(model_type: ModelType) -> str:
     if model_type == "vae":
         return os.environ.get("DEFAULT_CKPT_VAE", "ml/src/musicgen/runs/vae_v1/ckpt.pt")
     return os.environ.get("DEFAULT_CKPT_SIMPLE_VAE", "ml/src/musicgen/runs/simple_vae_v1/ckpt.pt")
+
+
+def _repo_root() -> Path:
+    env_root = os.environ.get("REPO_ROOT")
+    if env_root:
+        return Path(env_root).resolve()
+
+    # Best-effort search upwards from this file for a repo root that contains ml/src/musicgen.
+    here = Path(__file__).resolve()
+    for p in [here.parents[i] for i in range(0, 10)]:
+        if (p / "ml" / "src" / "musicgen").is_dir():
+            return p
+    # Fall back to CWD; callers can still pass absolute ckpt paths.
+    return Path.cwd()
+
+
+def _resolve_ckpt_path(path: str) -> str:
+    p = Path(path)
+    if p.is_absolute():
+        return str(p)
+    return str((_repo_root() / p).resolve())
 
 
 def _load_checkpoint(path: str) -> dict:
@@ -113,7 +135,8 @@ def generate_midi_bytes(req: GenerateRequest) -> bytes:
             if not (0 <= int(v) <= 7):
                 raise ValueError("Attribute bins must be in [0..7].")
 
-    ckpt_path = req.ckpt_path or _default_ckpt(req.model_type)
+    ckpt_path_raw = req.ckpt_path or _default_ckpt(req.model_type)
+    ckpt_path = _resolve_ckpt_path(ckpt_path_raw)
     if not os.path.exists(ckpt_path):
         raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
 

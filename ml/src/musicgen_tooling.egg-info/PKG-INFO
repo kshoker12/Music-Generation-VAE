@@ -1,0 +1,23 @@
+Metadata-Version: 2.4
+Name: musicgen-tooling
+Version: 0.0.0
+Summary: Local tooling for preprocessing + artifact validation (training runs on Kaggle).
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: numpy>=1.24
+Requires-Dist: torch<3,>=2.4
+Requires-Dist: scikit-learn>=1.4
+Requires-Dist: umap-learn>=0.5.6
+Requires-Dist: hdbscan>=0.8.33
+Requires-Dist: matplotlib>=3.8
+Requires-Dist: seaborn>=0.13
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0.0; extra == "dev"
+
+## `ml/` (local tooling)
+
+This folder is intentionally **not** the training codebase.
+
+- **Runs locally**: preprocessing, artifact validation, lightweight CPU inference checks
+- **Runs on Kaggle**: training notebooks + model definitions + ONNX export
+
