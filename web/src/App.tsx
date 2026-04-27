@@ -44,7 +44,29 @@ const MODEL_VERSIONS: Record<ModelFamily, ModelVersionSpec[]> = {
   ],
 };
 
-/** Parse RunPod runsync JSON → MIDI bytes (flat `output.midi_b64` or legacy `output.output.midi_b64`). */
+/** If RunPod (or a proxy) returns `output` as a JSON string, parse it to an object. */
+function unwrapRunpodNode(node: unknown): Record<string, unknown> | null {
+  if (node == null) return null;
+  if (typeof node === "string") {
+    const s = node.trim();
+    if (!s || s[0] !== "{") return null;
+    try {
+      const p = JSON.parse(s) as unknown;
+      if (typeof p === "object" && p !== null && !Array.isArray(p)) return p as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+    return null;
+  }
+  if (typeof node === "object" && !Array.isArray(node)) return node as Record<string, unknown>;
+  return null;
+}
+
+/**
+ * Parse RunPod /runsync JSON → MIDI bytes.
+ * Handles: flat `output.midi_b64`, legacy `output.output.midi_b64`, stringified `output`,
+ * and rare shapes where the handler payload appears at the top level.
+ */
 function midiFromRunpodResponse(data: unknown): { buf: ArrayBuffer } | { err: string } {
   if (!data || typeof data !== "object") return { err: "Invalid response JSON." };
   const root = data as Record<string, unknown>;
@@ -54,32 +76,59 @@ function midiFromRunpodResponse(data: unknown): { buf: ArrayBuffer } | { err: st
     return { err: `${root.error}${det}` };
   }
 
-  const out = root.output;
-  if (!out || typeof out !== "object") return { err: "Missing output in RunPod response." };
-  const o = out as Record<string, unknown>;
-
-  if (typeof o.error === "string") {
-    const det = o.detail != null ? ` ${JSON.stringify(o.detail)}` : "";
-    return { err: `${o.error}${det}` };
+  if (root.status === "FAILED") {
+    const msg = typeof root.error === "string" ? root.error : "RunPod job FAILED.";
+    return { err: msg };
   }
 
-  let b64 = typeof o.midi_b64 === "string" ? o.midi_b64 : "";
-  if (!b64 && o.output && typeof o.output === "object") {
-    const inner = o.output as Record<string, unknown>;
-    if (typeof inner.midi_b64 === "string") b64 = inner.midi_b64;
-    if (!b64 && typeof inner.error === "string") {
-      const det = inner.detail != null ? ` ${JSON.stringify(inner.detail)}` : "";
-      return { err: `${inner.error}${det}` };
+  const tryDecode = (o: Record<string, unknown>): string | null => {
+    const b64 = o.midi_b64;
+    return typeof b64 === "string" && b64.length > 0 ? b64 : null;
+  };
+
+  const tryErrors = (o: Record<string, unknown> | null): { err: string } | null => {
+    if (!o) return null;
+    if (typeof o.error === "string") {
+      const det = o.detail != null ? ` ${JSON.stringify(o.detail)}` : "";
+      return { err: `${o.error}${det}` };
     }
+    return null;
+  };
+
+  // RunPod wraps handler return in `output` (docs). Some responses use alternate keys or stringified JSON.
+  const rawOut = root.output ?? root["Output"];
+  let o = unwrapRunpodNode(rawOut);
+
+  const errLayer = tryErrors(o);
+  if (errLayer) return errLayer;
+
+  let b64 = o ? tryDecode(o) : null;
+
+  // Legacy: handler returned { output: { midi_b64 } } → nested output.output.midi_b64
+  if (!b64 && o) {
+    const inner = unwrapRunpodNode(o.output);
+    const errInner = tryErrors(inner);
+    if (errInner) return errInner;
+    if (inner) b64 = tryDecode(inner);
+  }
+
+  // Flat handler dict merged oddly, or empty `output` — try top-level midi_b64
+  if (!b64) {
+    const top = tryDecode(root);
+    if (top) b64 = top;
   }
 
   if (!b64 && typeof root.status === "string" && root.status !== "COMPLETED") {
-    if (root.status === "FAILED" || root.status === "CANCELLED" || root.status === "TIMED_OUT") {
+    if (root.status === "CANCELLED" || root.status === "TIMED_OUT") {
       return { err: `RunPod status: ${root.status}` };
     }
   }
 
-  if (!b64) return { err: "No midi_b64 in RunPod output." };
+  if (!b64) {
+    const keys = Object.keys(root).join(", ") || "(none)";
+    const outType = rawOut === undefined ? "undefined" : rawOut === null ? "null" : typeof rawOut;
+    return { err: `No midi_b64 in RunPod response (top-level keys: ${keys}; output type: ${outType}).` };
+  }
 
   try {
     const bin = atob(b64);
