@@ -9,6 +9,41 @@ type PlayerState = "stopped" | "playing" | "paused";
 
 const ATTR_NAMES = ["polyphony", "intensity", "velocity", "density"] as const;
 
+type ModelFamily = "hierarchical_vae" | "vae" | "plain";
+
+type ModelVersionSpec = {
+  id: string;
+  label: string;
+  model_type: ModelType;
+  ckpt_path: string; // repo-root-relative path; backend resolves relative to REPO_ROOT
+  block_size: number;
+};
+
+const MODEL_FAMILIES: Array<{ id: ModelFamily; label: string; subtitle: string }> = [
+  { id: "hierarchical_vae", label: "Hierarchical VAE", subtitle: "Encoder + Conductor + Decoder" },
+  { id: "vae", label: "VAE", subtitle: "Simple VAE baseline (no Conductor)" },
+  { id: "plain", label: "Plain Transformer", subtitle: "Decoder-only baseline" },
+];
+
+const MODEL_VERSIONS: Record<ModelFamily, ModelVersionSpec[]> = {
+  hierarchical_vae: [
+    { id: "v1", label: "v1", model_type: "vae", ckpt_path: "ml/src/musicgen/runs/vae_v1/ckpt.pt", block_size: 1024 },
+    { id: "v2", label: "v2", model_type: "vae", ckpt_path: "ml/src/musicgen/runs/vae_v2/ckpt.pt", block_size: 1024 },
+    { id: "v3", label: "v3", model_type: "vae", ckpt_path: "ml/src/musicgen/runs/vae_v3/ckpt.pt", block_size: 1024 },
+    { id: "v4", label: "v4", model_type: "vae", ckpt_path: "ml/src/musicgen/runs/vae_v4/ckpt.pt", block_size: 1024 },
+  ],
+  vae: [
+    { id: "v1", label: "v1", model_type: "simple_vae", ckpt_path: "ml/src/musicgen/runs/simple_v1/ckpt.pt", block_size: 1024 },
+    { id: "v2", label: "v2", model_type: "simple_vae", ckpt_path: "ml/src/musicgen/runs/simple_v2/ckpt.pt", block_size: 1024 },
+  ],
+  plain: [
+    { id: "v1", label: "v1", model_type: "plain", ckpt_path: "ml/src/musicgen/runs/plain_v1/ckpt.pt", block_size: 1024 },
+    { id: "v2", label: "v2", model_type: "plain", ckpt_path: "ml/src/musicgen/runs/plain_v2/ckpt.pt", block_size: 1024 },
+    { id: "v3", label: "v3", model_type: "plain", ckpt_path: "ml/src/musicgen/runs/plain_v3/ckpt.pt", block_size: 1024 },
+    { id: "v4", label: "v4", model_type: "plain", ckpt_path: "ml/src/musicgen/runs/plain_v4/ckpt.pt", block_size: 650 },
+  ],
+};
+
 function GlassCard({
   title,
   subtitle,
@@ -88,7 +123,8 @@ function SliderRow({
 }
 
 export default function App() {
-  const [model, setModel] = useState<ModelType>("vae");
+  const [family, setFamily] = useState<ModelFamily>("hierarchical_vae");
+  const [versionId, setVersionId] = useState("v3");
   const [phaseMode, setPhaseMode] = useState<PhaseMode>("two");
   const [seed, setSeed] = useState(123);
   const [temperature, setTemperature] = useState(1.0);
@@ -99,12 +135,25 @@ export default function App() {
 
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null);
   const [midiArrayBuffer, setMidiArrayBuffer] = useState<ArrayBuffer | null>(null);
+  const [midiTempoBpm, setMidiTempoBpm] = useState<number | null>(null);
   const [playerState, setPlayerState] = useState<PlayerState>("stopped");
 
   const [phase1, setPhase1] = useState([3, 3, 3, 3]);
   const [phase2, setPhase2] = useState([3, 3, 3, 3]);
 
   const effectivePhase2 = phaseMode === "one" ? phase1 : phase2;
+
+  const versionsForFamily = MODEL_VERSIONS[family];
+  const selectedVersion =
+    versionsForFamily.find((v) => v.id === versionId) ?? versionsForFamily[0];
+
+  useEffect(() => {
+    // Ensure version is always valid when switching families.
+    if (!versionsForFamily.some((v) => v.id === versionId)) {
+      setVersionId(versionsForFamily[0].id);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [family]);
 
   const attributesPreview = useMemo(() => {
     const bars: number[][] = [];
@@ -113,7 +162,11 @@ export default function App() {
   }, [phase1, effectivePhase2]);
 
   const synthRef = useRef<Tone.PolySynth<Tone.Synth> | null>(null);
+  const samplerRef = useRef<Tone.Sampler | null>(null);
   const partRef = useRef<Tone.Part | null>(null);
+  const reverbRef = useRef<Tone.Reverb | null>(null);
+  const [instrumentState, setInstrumentState] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const transposeSemitones = -7;
 
   function stopPlayback() {
     Tone.Transport.stop();
@@ -123,10 +176,70 @@ export default function App() {
     setPlayerState("stopped");
   }
 
+  async function ensurePianoReady() {
+    if (samplerRef.current) return;
+    setInstrumentState("loading");
+    try {
+      const reverb = new Tone.Reverb({ decay: 2.2, preDelay: 0.02, wet: 0.18 }).toDestination();
+      const sampler = new Tone.Sampler({
+        urls: {
+          A0: "A0.mp3",
+          C1: "C1.mp3",
+          "D#1": "Ds1.mp3",
+          "F#1": "Fs1.mp3",
+          A1: "A1.mp3",
+          C2: "C2.mp3",
+          "D#2": "Ds2.mp3",
+          "F#2": "Fs2.mp3",
+          A2: "A2.mp3",
+          C3: "C3.mp3",
+          "D#3": "Ds3.mp3",
+          "F#3": "Fs3.mp3",
+          A3: "A3.mp3",
+          C4: "C4.mp3",
+          "D#4": "Ds4.mp3",
+          "F#4": "Fs4.mp3",
+          A4: "A4.mp3",
+          C5: "C5.mp3",
+          "D#5": "Ds5.mp3",
+          "F#5": "Fs5.mp3",
+          A5: "A5.mp3",
+          C6: "C6.mp3",
+          "D#6": "Ds6.mp3",
+          "F#6": "Fs6.mp3",
+          A6: "A6.mp3",
+          C7: "C7.mp3",
+          "D#7": "Ds7.mp3",
+          "F#7": "Fs7.mp3",
+          A7: "A7.mp3",
+          C8: "C8.mp3",
+        },
+        baseUrl: "https://tonejs.github.io/audio/salamander/",
+        release: 1.2,
+      }).connect(reverb);
+
+      await Tone.loaded();
+
+      samplerRef.current = sampler;
+      reverbRef.current = reverb;
+      setInstrumentState("ready");
+    } catch (e) {
+      setInstrumentState("error");
+      throw e;
+    }
+  }
+
   function scheduleFromMidi(buf: ArrayBuffer) {
     stopPlayback();
 
     const midi = new Midi(buf);
+    const bpm = midi.header.tempos?.[0]?.bpm;
+    if (typeof bpm === "number" && Number.isFinite(bpm) && bpm > 0) {
+      Tone.Transport.bpm.value = bpm;
+      setMidiTempoBpm(bpm);
+    } else {
+      setMidiTempoBpm(null);
+    }
     if (!synthRef.current) {
       synthRef.current = new Tone.PolySynth(Tone.Synth, {
         volume: -10,
@@ -135,16 +248,21 @@ export default function App() {
       }).toDestination();
     }
 
-    const events: Array<[number, { note: string; duration: number; velocity: number }]> = [];
+    const events: Array<[number, { midi: number; duration: number; velocity: number }]> = [];
     for (const track of midi.tracks) {
       for (const n of track.notes) {
-        events.push([n.time, { note: n.name, duration: n.duration, velocity: n.velocity }]);
+        events.push([n.time, { midi: n.midi, duration: n.duration, velocity: n.velocity }]);
       }
     }
     events.sort((a, b) => a[0] - b[0]);
 
-    const part = new Tone.Part((time, value: { note: string; duration: number; velocity: number }) => {
-      synthRef.current?.triggerAttackRelease(value.note, value.duration, time, value.velocity);
+    const part = new Tone.Part((time, value: { midi: number; duration: number; velocity: number }) => {
+      const note = Tone.Frequency(value.midi + transposeSemitones, "midi").toNote();
+      if (samplerRef.current) {
+        samplerRef.current.triggerAttackRelease(note, value.duration, time, value.velocity);
+      } else {
+        synthRef.current?.triggerAttackRelease(note, value.duration, time, value.velocity);
+      }
     }, events);
     part.start(0);
     partRef.current = part;
@@ -155,6 +273,7 @@ export default function App() {
   async function play() {
     if (!midiArrayBuffer) return;
     await Tone.start();
+    await ensurePianoReady();
     if (!partRef.current) scheduleFromMidi(midiArrayBuffer);
     Tone.Transport.start();
     setPlayerState("playing");
@@ -171,6 +290,10 @@ export default function App() {
       stopPlayback();
       synthRef.current?.dispose();
       synthRef.current = null;
+      samplerRef.current?.dispose();
+      samplerRef.current = null;
+      reverbRef.current?.dispose();
+      reverbRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -207,20 +330,37 @@ export default function App() {
                   <label className="flex flex-col gap-1">
                     <span className="text-xs text-white/60">Model</span>
                     <select
-                      className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-white outline-none ring-0 backdrop-blur"
-                      value={model}
+                      className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-gray-400 outline-none ring-0 backdrop-blur"
+                      value={family}
                       disabled={busy}
-                      onChange={(e) => setModel(e.target.value as ModelType)}
+                      onChange={(e) => setFamily(e.target.value as ModelFamily)}
                     >
-                      <option value="plain">plain</option>
-                      <option value="vae">vae</option>
-                      <option value="simple_vae">simple_vae</option>
+                      {MODEL_FAMILIES.map((f) => (
+                        <option key={f.id} value={f.id}>
+                          {f.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="flex flex-col gap-1">
+                    <span className="text-xs text-white/60">Version</span>
+                    <select
+                      className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-gray-400 outline-none ring-0 backdrop-blur"
+                      value={selectedVersion.id}
+                      disabled={busy}
+                      onChange={(e) => setVersionId(e.target.value)}
+                    >
+                      {versionsForFamily.map((v) => (
+                        <option key={v.id} value={v.id}>
+                          {v.label}
+                        </option>
+                      ))}
                     </select>
                   </label>
                   <label className="flex flex-col gap-1">
                     <span className="text-xs text-white/60">Phases</span>
                     <select
-                      className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-white outline-none ring-0 backdrop-blur"
+                      className="rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-gray-400 outline-none ring-0 backdrop-blur"
                       value={phaseMode}
                       disabled={busy}
                       onChange={(e) => setPhaseMode(e.target.value as PhaseMode)}
@@ -279,6 +419,7 @@ export default function App() {
                         if (downloadUrl) URL.revokeObjectURL(downloadUrl);
                         setDownloadUrl(null);
                         setMidiArrayBuffer(null);
+                        setMidiTempoBpm(null);
                         stopPlayback();
 
                         try {
@@ -300,13 +441,14 @@ export default function App() {
                                 "X-API-Key": apiKey,
                               },
                               body: JSON.stringify({
-                                model_type: model,
+                                model_type: selectedVersion.model_type,
                                 attributes: attributesPreview,
                                 seed,
                                 temperature,
                                 top_p: topP,
-                                block_size: 1024,
+                                block_size: selectedVersion.block_size,
                                 bars_per_sample: 8,
+                                ckpt_path: selectedVersion.ckpt_path,
                               }),
                               signal: controller.signal,
                             });
@@ -409,7 +551,7 @@ export default function App() {
                     <a
                       className="rounded-lg bg-emerald-500/90 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-500"
                       href={downloadUrl}
-                      download={`generated_${model}_seed${seed}.mid`}
+                      download={`generated_${selectedVersion.model_type}_${family}_${selectedVersion.id}_seed${seed}.mid`}
                     >
                       Download MIDI
                     </a>
@@ -424,16 +566,26 @@ export default function App() {
                   <div className="flex flex-wrap items-center gap-2">
                     <button
                       type="button"
-                      disabled={!midiArrayBuffer || busy || playerState === "playing"}
+                      disabled={
+                        !midiArrayBuffer ||
+                        busy ||
+                        playerState === "playing" ||
+                        instrumentState === "loading" ||
+                        instrumentState === "error"
+                      }
                       className={[
                         "rounded-lg px-3 py-2 text-sm font-semibold",
-                        !midiArrayBuffer || busy || playerState === "playing"
+                        !midiArrayBuffer ||
+                        busy ||
+                        playerState === "playing" ||
+                        instrumentState === "loading" ||
+                        instrumentState === "error"
                           ? "cursor-not-allowed bg-white/10 text-white/35"
                           : "bg-white/10 text-white hover:bg-white/15",
                       ].join(" ")}
                       onClick={play}
                     >
-                      Play
+                      {instrumentState === "loading" ? "Loading…" : "Play"}
                     </button>
                     <button
                       type="button"
@@ -463,7 +615,17 @@ export default function App() {
                     </button>
 
                     <div className="ml-auto text-xs text-white/45">
-                      {midiArrayBuffer ? "Audio uses your device volume." : "Generate to enable playback."}
+                      {midiArrayBuffer
+                        ? `${
+                            instrumentState === "ready"
+                              ? "Piano: sampled"
+                              : instrumentState === "loading"
+                                ? "Loading piano…"
+                                : instrumentState === "error"
+                                  ? "Piano load failed"
+                                  : "Piano: not loaded"
+                          } · Tempo: ${midiTempoBpm ? Math.round(midiTempoBpm) : "—"} BPM · Audio uses your device volume.`
+                        : "Generate to enable playback."}
                     </div>
                   </div>
 
