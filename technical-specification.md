@@ -291,6 +291,72 @@ config = TokenizerConfig(
 | Plain v3 | Plain decoder (baseline) | 1024 | 15 | 50,000 | 1.8028 | — | 1.7071 | — | 1.7740 | — |
 | Plain v2 | Plain decoder (baseline) | 1024 | 40 | 20,000 | 1.7721 | — | 1.7827 | — | 1.7672 | — |
 | Plain v1 | Plain decoder (baseline) | 1024 | 16 | 10,000 | 2.0268 | — | 1.9558 | — | 1.9447 | — |
+
+# Evaluation (final protocol)
+
+This project’s evaluation is designed to be **simple, reproducible, and high-signal** while directly testing the model claims:
+
+- **(E1) Reconstruction accuracy + latent usage** on the **held-out test split**
+- **(E2) Attribute controllability** (quantitative bins + correlations + disentanglement)
+- **(E3) Latent space organization** (UMAP visualization + one quantitative score)
+
+All evaluation code is implemented as Kaggle-style notebooks under `kaggle/notebooks/` and writes plots + machine-readable JSON under `artifacts/`.
+
+## E1 — Test-set reconstruction accuracy + KL usage
+
+**Applies to:** Plain Transformer (recon only), Simple VAE (recon + KL), Hierarchical VAE (recon + KL).
+
+**Metrics (test split):**
+
+- **PAD-masked reconstruction cross-entropy / NLL** (token CE with `<PAD>` ignored)
+- **Per-token perplexity**: \(\text{PPL} = \exp(\text{CE})\)
+- **For VAEs only:** **true KL bits/dim** (not clamped by free-bits) + histogram across dimensions
+- **For VAEs only:** **active units** = number (or %) of latent dimensions with KL bits/dim above a threshold (default: the same \(\lambda\) used for KL-free-bits, converted to bits)
+
+**Implementation notes:**
+
+- Evaluate using **teacher forcing** on the test memmap split.
+- Report mean/median and (optionally) confidence intervals via batch resampling.
+
+## E2 — Attribute controllability (accuracy + correlation + disentanglement)
+
+**Goal:** show that the learned attribute embeddings \(A_k\) act as reliable control knobs for **Polyphony**, **Rhythmic Intensity**, **Velocity Dynamics**, and **Note Density** (each binned 0–7).
+
+**Generation protocol (per model):**
+
+- For each attribute \(a \in \{\)polyphony, intensity, velocity, density\(\}\) and requested bin \(b \in \{0,\dots,7\}\):
+  - Generate \(N\) samples with \(a=b\)
+  - Hold the other 3 attributes fixed to a baseline bin (default: 3)
+  - Keep decoding settings fixed (temperature, top-p, block size, bars per sample)
+- Default \(N=50\) (scale to \(N=100\) if runtime allows)
+
+**Measurement protocol (per generated sample):**
+
+- Recompute the **raw per-bar attribute statistics** from the generated MIDI using the **same definitions used in preprocessing**
+- Map each raw statistic back to a bin using the same **global quantile edges** (`quantiles.json` / equivalent)
+
+**Reported metrics (per attribute, per model):**
+
+- **Spearman** and **Pearson** correlation between requested bin and measured raw statistic
+- **Exact-bin accuracy** and **±1-bin accuracy**
+- **Confusion matrix** (requested bin vs measured bin)
+- **Disentanglement check:** when sweeping one attribute, measure how much the **other attributes** change (correlations / slopes should be near 0 for ideal disentanglement)
+
+## E3 — Latent space visualization + simple quantitative score
+
+**Applies to:** VAEs (Simple + Hierarchical).
+
+**Protocol:**
+
+- Encode a large subset of the test split and collect **encoder mean \(\mu\)** vectors for \(z_p\) (128-D).
+- Dimensionality reduction: **PCA → UMAP (2D)**.
+- Color UMAP points by:
+  - attribute bins (polyphony/intensity/velocity/density), and
+  - dataset metadata (e.g., composer/source) if available.
+
+**Quantitative add-on (one score):**
+
+- **kNN label purity** in latent space for at least one available label (dataset source or composer).
 # Inference
 - **Music Generation:** The primary goal is to generate a short, coherent classical piano piece ($8$ bars \(\approx 12\)–\(32\) seconds depending on tempo) from a sampled global latent vector, while giving the user full real-time control over musical attributes.
 - **Controllable Attributes (The Phased UI):** Attribute embeddings $A_k$ ($128$-dimensional) act as explicit, orthogonal control knobs. Each of the four attributes (Polyphony, Intensity, Velocity, Density) is binned into $8$ levels ($0$–$7$).
