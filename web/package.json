@@ -9,9 +9,9 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@tonejs/midi": "^2.0.28",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "@tonejs/midi": "^2.0.28",
     "tone": "^15.1.22"
   },
   "devDependencies": {
@@ -19,10 +19,12 @@
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.3",
     "autoprefixer": "^10.4.20",
+    "node-web-audio-api": "^2.0.0",
     "postcss": "^8.4.47",
+    "puppeteer": "^25.1.0",
+    "puppeteer-core": "^25.1.0",
     "tailwindcss": "^3.4.14",
     "typescript": "^5.6.3",
     "vite": "^5.4.10"
   }
 }
-

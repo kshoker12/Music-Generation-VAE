@@ -106,7 +106,7 @@ config = TokenizerConfig(
 	- Velocity Dynamics: Allows controlling volume (Loud vs. Soft).
 	- Note Density: Allows controlling speed/activity (the total number of note onsets per measure).
 - **Embedding Mechanism:** Each attribute is first binned into one of $8$ discrete levels ($0$–$7$) using global quantiles from the training set. These integer levels are passed through learned embedding lookup tables (`nn.Embedding`). Each attribute produces a $32$-dimensional vector; the four vectors are concatenated to form a single $128$-dimensional attribute condition vector $A_k$ for each bar. 
-- **Integration:** $A_k$ ($128$-dimensional) is concatenated with the bar-level latent vector $z_k$ ($384$-dimensional) to produce the final **$512$-dimensional** condition vector $C_k = [z_k;\ A_k]$. This $C_k$ vector is injected into the decoder via Modulated In-Attention via FiLM at every layer and timestep. Maintaining this $3:1$ dimensional ratio physically forces the Decoder to prioritize the musical contour ($z_k$) over the physical attributes ($A_k$), preventing latent drowning.
+- **Integration:** $A_k$ ($128$-dimensional) is concatenated with the bar-level latent vector $z_k$ ($384$-dimensional) to produce the final **$512$-dimensional** condition vector $C_k = [z_k;\ A_k]$. This $C_k$ vector is injected into the decoder via FiLM scale/shift modulation before self-attention at every layer and timestep. Maintaining this $3:1$ dimensional ratio physically forces the Decoder to prioritize the musical contour ($z_k$) over the physical attributes ($A_k$), preventing latent drowning.
 - **Purpose:** These embeddings act as explicit, orthogonal control knobs (mixed-effect terms). By providing them directly, the VAE is relieved of the burden of encoding low-level rhythm/dynamics into the global latent $z_p$, allowing $z_p$ to focus purely on high-level harmonic and melodic identity. This enables intuitive user control at inference time while preserving musical coherence.
 # Encoder
 - **Encoder:** Takes input chunk $x$ and outputs parameters $\mu$ and $\sigma^2$, parameters of Gaussian Distribution, approximating the true posterior distribution $p(z_p | x)$ using a network $q_\phi(z_p |x)=\mathcal N(z_p; \mu, \sigma^2\mathbf I)$.
@@ -183,11 +183,11 @@ config = TokenizerConfig(
 	- **Smoothness & Interpolation:** Because $z_p$ is regularized by the KL Divergence term of the ELBO loss to approximate a standard normal distribution $\mathcal{N}(0, \mathbf{I})$, the latent space is a completely continuous manifold. This allows for arithmetic operations; sampling a coordinate exactly halfway between two distinct $z_p$ vectors will decode into a coherent, novel sequence that musically interpolates the stylistic qualities of the two original sequences.
 - **Bar-Level Latent $z_k$ ($384$-dimensional):** This is a deterministic sequence of vectors produced by the Conductor network given the global $z_p$.
     - **What it Encodes:** $z_k$ translates the abstract global style into localized, bar-specific instructions.
-    - Dimensional Expansion: $z_p$ undergoes a linear projection (`nn.Linear(128, 768)`) and is then reshaped into two $384$-dimensional initial hidden states (one per GRU layer) before being fed into the Conductor GRU. The $128$-dimensional global bottleneck forces the VAE to learn foundational musical structure, while the expanded $384$-dimensional $z_k$ sequence mathematically matches the Decoder’s hidden dimension (`n_embed`) for clean Modulated In-Attention via FiLM conditioning.
+    - Dimensional Expansion: $z_p$ undergoes a linear projection (`nn.Linear(128, 768)`) and is then reshaped into two $384$-dimensional initial hidden states (one per GRU layer) before being fed into the Conductor GRU. The $128$-dimensional global bottleneck forces the VAE to learn foundational musical structure, while the expanded $384$-dimensional $z_k$ sequence mathematically matches the Decoder’s hidden dimension (`n_embed`) for clean FiLM scale/shift modulation before self-attention conditioning.
 # Decoder
 - **Decoder:** Causal (autoregressive) Transformer that generates the next REMI token at each step, conditioned on the full history of previously generated tokens and the bar-level condition vectors $c_k$. 
 - **Purpose:** The decoder is the generative core of the model. It takes the global style $z_p$ and bar-level guidance $z_k$ and $A_k$ and auto-regressively produces a coherent sequence of REMI tokens that form a complete musical piece.
-- **Architecture:** $6$-layer Causal Transformer Decoder (GPT-style) utilizing a Modulated In-Attention via FiLM conditioning mechanism.
+- **Architecture:** $6$-layer Causal Transformer Decoder (GPT-style) with FiLM scale/shift modulation before self-attention at each layer.
 	- **Hyper-Parameters:**
 	    - `n_layers`: $6$
 	    - `n_embed`: $512$
@@ -242,11 +242,11 @@ config = TokenizerConfig(
 		- **Mechanism:** Standard auto-regressive next-token prediction. It is calculated using Categorical Cross-Entropy loss between the Decoder's output logits and the ground-truth sequence $X$.  
 		- **Math:**  
 		$$ \mathcal{L}_{\text{Recon}} = -\mathbb{E}_{q_\phi(z_p|x)} [\log p_\theta(X \mid z_p, A)] $$  
-		(where the decoder is conditioned on the full hierarchical vector $C_k = [z_k; A_k]$ at every bar via Modulated In-Attention via FiLM).
+		(where the decoder is conditioned on the full hierarchical vector $C_k = [z_k; A_k]$ at every bar via FiLM scale/shift modulation before self-attention).
 	- **Regularization Loss & Cyclical β-Annealing ($\mathcal{L}_{\text{KL}}$)**  
 		- **Purpose:** Regularizes the global latent space $z_p$ ($128$-dimensional) to approximate a standard normal prior $\mathcal{N}(0, I)$, ensuring the space is continuous and smoothly interpolatable.  
 		- **The Posterior Collapse Threat:** Because the Decoder is a powerful autoregressive Transformer, it is highly susceptible to posterior collapse (ignoring $z_p$ entirely and relying solely on causal history).  
-		- **The Cyclical β-Annealing Solution:** We utilize a **cyclical schedule**. Over $40$ epochs, $\beta$ will complete $4$ cycles ($10$ epochs each). In each cycle, $\beta$ ramps from $0.0$ to $0.1$ for $5K$ iterations and stays at $0.1$ for $5K$ iterations . This "shocks" the model into re-learning latent dependencies periodically.
+	- **The Cyclical β-Annealing Solution:** We utilize a **cyclical schedule** on optimizer steps: over each **10,000-step** cycle, \(\beta\) ramps from \(0.0\) to \(0.1\) for **5,000** steps and holds at \(0.1\) for **5,000** steps (see \texttt{04\_vae\_dev.ipynb}). This periodically reintroduces KL pressure after reconstruction-focused phases.
 		- **KL Free Bits (Hinge Loss)**: To prevent **Posterior Collapse**, we apply a "free bits" threshold $\lambda$ **per latent dimension after batch-averaging**, which is more stable than hinging per-sample:
 		$$\mathcal{L}_{KL} = \sum_{i=1}^{128} \max\Big(\mathbb{E}_{x \sim \text{batch}}\big[D_{KL}(q_\phi(z_p^i \mid x) \parallel \mathcal{N}(0, 1))\big], \lambda\Big)$$
 		We set $\lambda = 1.0$ bit (converted to nats in code). This ensures the model is not penalized for using the latent space up to a certain complexity, preserving the "information budget" of each dimension while keeping training stable.
@@ -365,7 +365,7 @@ All evaluation code is implemented as Kaggle-style notebooks under `kaggle/noteb
 	1. **Prior Sampling:** Sample a global latent vector $z_p \sim \mathcal{N}(0, I)$ from the prior. _(Note: Users can also spherically interpolate between two known $z_p$ vectors)._
 	2. **Temporal Unrolling:** Pass $z_p$ through the deterministic $2$-layer GRU Conductor to obtain the sequence of $8$ bar-level latent vectors $z_{1:8}$.
 	3. **Condition Formulation:** For each bar $k$, construct the condition vector $C_k = [z_k; A_k]$ by concatenating $z_k$ with the user-specified phased attribute vector $A_k$.
-	4. **Autoregressive Generation:** Start the Decoder with a `<BOS>` token. At every step, the Decoder processes the token history and the current condition vector $C_k$ via **Modulated In-Attention via FiLM**.
+	4. **Autoregressive Generation:** Start the Decoder with a `<BOS>` token. At every step, the Decoder processes the token history and the current condition vector $C_k$ via **FiLM scale/shift modulation before self-attention**.
 	5. **Grammar Masking:** To guarantee musically legal output without post-hoc repair, the tokenizer’s vocabulary constraints are enforced before sampling. Logits of invalid tokens are masked to $-\infty$.
 		- `<Bar>` must be followed by `[Position]`
 		- `[Pitch]` must be followed by `[Velocity]`.
