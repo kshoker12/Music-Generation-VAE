@@ -1,6 +1,6 @@
 # Deep-kernel MMD test: which model's samples are closest to real music
 
-Status: built (2026-10-23). Notebook: `kaggle/notebooks/024_mmd_two_sample.ipynb`.
+Status: run 1 done (2026-10-23, results below); run 2 adds the shared-kernel relative-similarity test. Notebook: `kaggle/notebooks/024_mmd_two_sample.ipynb`.
 
 ## Question
 
@@ -14,9 +14,9 @@ Method: the learned deep-kernel MMD test (MMD-D) of Liu et al. (2020), "Learning
 |---|---|---|
 | Models | All three: `plain_v3`, `simple_v2`, `vae_v3` | Plain is the baseline for "does a latent make samples more realistic". If it is less diverse, the test measures that; excluding it would assume the answer. |
 | Test | MMD-D only | The paper's best method; the question is a ranking, not a method comparison. |
-| Sample size | Up to $N = 5000$ excerpts per model, floor 1000, set by a timing pilot to fit the 9 h session (see Compute) | Larger $N$ gives a better-trained kernel and a tighter ranking statistic. |
+| Sample size | Up to $N = 10000$ excerpts per model (run 1: 5000), floor 1000, set by a timing pilot to fit the 9 h session (see Compute) | Larger $N$ gives a better-trained kernel and a tighter ranking statistic. |
 | Splits | 10 random train/test splits of the same pools | As in the paper's CIFAR-10.1 experiment (fixed pools, ten repetitions). |
-| Ranking statistic | Held-out $\hat{J}$ (below) | p-values will all hit the permutation floor; $\hat{J}$ does not saturate. |
+| Ranking statistic | Run 2: relative-similarity test under one shared kernel (headline). Per-model held-out $\hat{J}$ kept as a secondary score. | Run 1 showed every model rejected and a near-tie in per-model $\hat J$ under separately trained kernels, which are not on one scale. The relative test compares models directly with a p-value, and the B-B term that clustering inflates cancels in it. |
 | Features | CLaMP 2 music-encoder embeddings | Large pretrained symbolic-music encoder; the default extractor of Fréchet Music Distance. |
 | Sampling | temperature 1.0, top-p 0.9, grammar mask | Same settings as the listening test and demo. Applied identically to all models. |
 | Control | Real vs real, piece-disjoint (val vs test), plus a cross-kernel control per model | Checks the false-positive rate, including the inflation from several chunks per piece, under the kernel that scores each model (see Dependence). |
@@ -64,7 +64,7 @@ Every real and generated excerpt goes through the same path: REMI tokens, then a
 
 Comparisons: $Q_{\text{plain}}$ vs B, $Q_{\text{simple}}$ vs B, $Q_{\text{hier}}$ vs B, and A vs B (control).
 
-1. Random split of each side ($n_{\text{all}}$ points): 50% test, 40% fit, 10% validation. A and all $Q_m$ share one permutation per split (index-aligned), B has its own; so no model's kernel trains on an excerpt conditioned on an A chunk that is in the control's test half. The paper's experiments use equal train and test sizes; its Corollary 14 says the power-optimal train share for a fixed pool is smaller (order $N^{3/4}$), but with constants that cannot be computed here, so the paper's practice is kept.
+1. Split each side ($n_{\text{all}}$ points) about 50% test, 10% validation, 40% fit, **by block**: whole blocks of 500 consecutive memmap indices go to test, then validation, then fit, in random block order, so no piece (pieces are stored contiguously) has chunks on both sides of the split. Run 1 split by row, so the kernel trained on other chunks of the test pieces. Each part is trimmed at random to equal size on both sides (the estimators need equal $n$). A and all $Q_m$ use the same assignment (index-aligned, by A's memmap index), B its own; so no model's kernel trains on an excerpt conditioned on an A chunk in the control's test half. The paper's experiments use equal train and test sizes; its Corollary 14 says the power-optimal train share for a fixed pool is smaller (order $N^{3/4}$), but with constants that cannot be computed here, so the paper's practice is kept.
 2. Standardize embeddings with mean and std from the pooled fit halves. The scaler is then frozen and applied unchanged to validation, test, and every permutation. Refitting it inside the permutation loop would leak.
 3. Kernel (paper eq. 1):
    $$k_\omega(x,y) = \big[(1-\epsilon)\,\kappa(\phi_\omega(x),\phi_\omega(y)) + \epsilon\big]\,q(x,y)$$
@@ -77,6 +77,27 @@ Comparisons: $Q_{\text{plain}}$ vs B, $Q_{\text{simple}}$ vs B, $Q_{\text{hier}}
 6. Test: on the test halves, compute $\widehat{\mathrm{MMD}}_u^2$ and a permutation p-value with 200 permutations, $p = (1 + \#\{\text{perm} \ge \text{est}\}) / (1 + 200)$, reject at $p \le \alpha = 0.05$. (Algorithm 1 omits the $+1$; it keeps the test exactly valid.) Also compute held-out $\hat J_\lambda$ with the frozen kernel. The p-value is the paper's test; held-out $\hat J$ is an added score, not the paper's reported outcome (it reports rejection rates).
 
 Total runs: 4 comparisons × 10 splits = 40 trained kernels, plus 30 cross-kernel control tests (no training; see Dependence).
+
+## Relative similarity under a shared kernel (run 2)
+
+Per split, after the per-model tests:
+
+1. **Shared kernel.** Pool the generated fit sets: for each fit index $i$, take $Q_m[i]$ for a model $m$ drawn uniformly from the three. Train one deep kernel on B (fit) vs the pooled sample, same settings and early stopping as above.
+2. **Pairs.** On the test halves, row $i$ of every generated set (all conditioned on grid $A_i$) is paired with B row $i$, so $(q^{(1)}_i, q^{(2)}_i, b_i)$ are iid triples. With $H^{(m)}_{ij} = k(q^{(m)}_i, q^{(m)}_j) + k(b_i, b_j) - k(q^{(m)}_i, b_j) - k(q^{(m)}_j, b_i)$,
+   $$D = \widehat{\mathrm{MMD}}_u^2(Q_1, B) - \widehat{\mathrm{MMD}}_u^2(Q_2, B) = \frac{1}{n(n-1)}\sum_{i \ne j} \big(H^{(1)}_{ij} - H^{(2)}_{ij}\big),$$
+   a U-statistic whose $k(b_i, b_j)$ terms cancel. $D < 0$: the first set is closer to real music. This follows the relative-similarity test of Bounliphone et al. (ICLR 2016), with a learned shared kernel in place of a fixed one.
+3. **Standard errors.** Linearize: $D - \mathbb{E}D \approx \frac{2}{n}\sum_i e_i$, with $e_i$ the row mean of $H^{(1)} - H^{(2)}$ minus $D$. The rows are not independent: real chunks come several per piece (about 12 at $N = 10000$), and every generated row inherits the piece of its conditioning chunk. Pieces are stored contiguously in the memmaps (pitch-class cosine between chunks: 0.81 at index distance 1, 0.70 at 5, 0.61 at 25, 0.59 at 100, random pairs 0.585). So rows are grouped into blocks of 200 consecutive memmap indices on the conditioning side and on the real side, and $\mathrm{Var}(\sum_i e_i)$ is the two-way cluster-robust (Cameron, Gelbach, Miller) sum over blocks, floored at the larger one-way value. This is computed for block widths 200 and 1000 (long performances can span more than 200 indices); the decision SE is the largest of the two and the naive SE, and $z_{\text{cluster}} = D / \mathrm{se}$, two-sided normal p-value. With three model pairs, a strict claim uses Bonferroni ($p \le 0.05/3$), also reported. The naive (independent-row) $z$ and the design effect (clustered over naive variance) are reported next to it.
+4. **Fixed-kernel check.** The same test with a plain Gaussian kernel on the standardized embeddings (median-distance bandwidth, no training), as in Bounliphone et al. The learned kernel is trained on all three models pooled, so a model whose flaws differ from the other two gets less of its attention; agreement between the two kernels guards against that.
+5. **Calibration.** `plain2` is a second plain sample on the same grids with different seeds; plain vs plain2 has true $D = 0$ and should reject about 5% of the time (3 or more in 10 fails). This checks the implementation, not robustness to clustering: for two samples of one model the piece-level terms cancel, so it would pass even with naive SEs. Clustering is handled by step 3.
+6. Also reported per split: MMD² and $J$ of every set vs B under the shared kernel (one scale), and the A vs B control under the shared kernel.
+
+Pairs: plain-simple, plain-hier, simple-hier, plain-plain2.
+
+Synthetic checks:
+- Independent rows (64 dimensions, 600 test points per side, learned kernel, 40 null trials): $z$ mean $-0.02$, sd $0.97$, 0/40 rejections; one set truly closer: 10/10 rejections, correct sign.
+- Piece-clustered rows (12 chunks per piece on both sides, two models equally far from B but differing piece by piece, fixed kernel, 300 null trials): naive $z$ sd 2.96 to 3.01, 54 to 55% false rejections; clustered $z$ (single width) sd 1.07, 6% rejections, design effect about 8; final decision rule (two widths, naive floor) sd 1.09, 6.3% rejections. One set truly closer: 30/30 rejections, correct sign.
+
+Reading: a pair is resolved if it rejects (clustered; Bonferroni for a strict claim) in most splits, with a consistent sign, under both kernels, and the calibration passes. "Most of 10 splits" is a reading rule, not a formal test: the splits reuse one sample. Report $D$, $z_{\text{cluster}}$, and rejections; do not report per-model $\hat J$ gaps as a ranking. Effective sample size is closer to the number of pieces (about 850 per split) than to $N$, so going from 5000 to 10000 adds less than $\sqrt 2$ in precision.
 
 ## Ranking and reporting
 
@@ -114,9 +135,9 @@ Budget, enforced in the notebook (seconds since the first cell):
 |---|---|
 | Install, CLaMP 2 download, load, checks | about 15 min |
 | Timing pilot (first batch per model + 24 embeddings) | about 5 min |
-| Generation | 3 h (hard stop at 3.75 h) |
-| MIDI + CLaMP 2 embedding of 5 sets | 2 h |
-| Tests (40 trained kernels + 30 cross-kernel controls) | 1.5 h reserved |
+| Generation (4 sets incl. plain2) | 2.5 h (hard stop at 3.1 h) |
+| MIDI + CLaMP 2 embedding of 6 sets | 2.5 h |
+| Tests (40 per-model kernels, 10 shared kernels, controls) | 3 h reserved |
 | Deadline | 8.25 h; any stage past it stops and results are written |
 
 $N$ rule: after the pilot, $N = \min(5000,\ \text{gen budget}/\text{gen rate},\ \text{emb budget}/\text{emb rate},\ \text{time left before the test reserve}/(\text{gen}+\text{emb rate}))$, the same $N$ for all models, with a warning below the floor of 1000. During generation, a batch is skipped if it would push generation plus embedding of everything generated into the test reserve. `results.json` is rewritten after every split, so a run stopped by the deadline still has results.
@@ -166,14 +187,30 @@ Dry run: $N = 64$, batch 32, 1 split, 50 training steps (validation every 5), 50
 
 `ml/src/musicgen/inference/generate.py` (and the copy inlined in notebook 08) starts generation with `BOS`, which never occurs in training data, and `compute_bar_indices_prefix` then assigns the first bar index 1: bars 1 to 7 are conditioned on attribute rows 1 to 7 (and, for the hierarchical VAE, Conductor steps 1 to 7), and bar 8 reuses row 7. Row 0 is never used. Constant-attribute sweeps are unaffected in $A_k$, but bar-varying prompts (the Crescendo listening prompt) and the Conductor's $z_k$ are shifted by one bar. This notebook starts from `Bar` and does not use that path. Not fixed in the repo.
 
+## Run 1 results (2026-10-23, N = 5000, 1.06 h on a T4)
+
+Measured: 0.056 s per excerpt per model, 0.083 s per file for MIDI + CLaMP 2. $n_{\text{all}} = 4926$ (dropped: plain 43, simple 12, hier 27); fit/val/test 1970/493/2463 per side.
+
+| vs B | held-out $\hat J$ | held-out MMD² | rejections | fit / val $\hat J$ |
+|---|---|---|---|---|
+| plain | 0.870 ± 0.028 | 0.0897 | 10/10 | 1.45 / 0.90 |
+| hier | 0.886 ± 0.022 | 0.1017 | 10/10 | 1.29 / 0.90 |
+| simple | 0.911 ± 0.026 | 0.0909 | 10/10 | 1.47 / 0.91 |
+| A (control) | 0.066 ± 0.008 | 0.0004 | 10/10 | 0.58 / 0.07 |
+
+Cross-kernel controls: 10/10 for every model. Attribute shifts at most 0.16 bins for every model.
+
+Reading: every model is clearly distinguishable from real music; the generated-vs-real effect is about 13 times the control's $\hat J$ and about 250 times its MMD². The control failed: two disjoint sets of real pieces (val, test) are distinguishable at this $n$, from piece clustering and from the two splits being different finite sets of about 850 pieces. Per the reading rule, only $\hat J$ relative to the control is reportable (plain 13.1, hier 13.4, simple 13.8 times). The models are a tie: gaps are about one sd (which understates uncertainty, since splits share samples), and the MMD² order differs from the $\hat J$ order. Run 2 adds the relative-similarity test above to compare the models directly.
+
 ## What this can and cannot claim
 
 Can claim: at $n_{\text{all}}$ samples per side, under CLaMP 2 features, model X's excerpts are harder to distinguish from held-out real excerpts than model Y's, with the given $\hat J$ and rejection counts, and the control behaves as expected.
 
-Cannot claim: perceptual quality, or a significance statement for "X is closer than Y". That needs a relative-similarity test (Bounliphone et al., ICLR 2016; verify before citing) or a shared kernel across models.
+Cannot claim: perceptual quality. A significance statement for "X is closer than Y" comes only from the run 2 relative-similarity test, and only if its calibration passes.
 
 ## References
 
 - Liu, Xu, Lu, Zhang, Gretton, Sutherland. Learning Deep Kernels for Non-Parametric Two-Sample Tests. ICML 2020. arXiv:2002.09116.
 - Frechet Music Distance: A Metric For Generative Symbolic Music Evaluation. arXiv:2412.07948. Library: https://github.com/jryban/frechet-music-distance
 - CLaMP 2 (Wu et al., 2024): the symbolic music encoder used by the library above.
+- Bounliphone, Belilovsky, Blaschko, Antonoglou, Gretton. A Test of Relative Similarity for Model Selection in Generative Models. ICLR 2016. arXiv:1511.04581 (verify before citing).
